@@ -1,14 +1,17 @@
-// Hollowtree — third-person spring-follow camera: look-ahead, bank roll, boost FOV kick, terrain push-out.
+// Hollowtree — third-person spring-follow camera: look-ahead, bank roll, boost FOV kick, framing clamp, terrain push-out.
 
 import { Vector3, MathUtils } from "three";
-import { CAMERA } from "../config.js";
+import { CAMERA, CAMERA_FRAME } from "../config.js";
 
 const _desired = new Vector3();
 const _dir = new Vector3();
 const _lookTarget = new Vector3();
 const _vel = new Vector3();
+const _acc = new Vector3();
 const _lag = new Vector3();
-const _prevVel = new Vector3();
+const _bee = new Vector3();
+const _toBee = new Vector3();
+const _camFwd = new Vector3();
 
 function damp(rate, dt) {
   return Math.exp(-rate * dt);
@@ -21,6 +24,8 @@ export function createCameraRig(camera, flightState) {
   let fov = CAMERA.fov;
   let clock = 0;
   let started = false;
+  let prevYaw = 0;
+  let yawSpeed = 0;
 
   const pos = new Vector3();
   const posVel = new Vector3();
@@ -37,6 +42,12 @@ export function createCameraRig(camera, flightState) {
     return t && t.getHeight ? t.getHeight(x, z) : -Infinity;
   }
 
+  function wrapAngle(a) {
+    a = (a + Math.PI) % (Math.PI * 2);
+    if (a < 0) a += Math.PI * 2;
+    return a - Math.PI;
+  }
+
   function update(dt, input, fs) {
     const s = fs || flightState;
     if (!s) return;
@@ -51,19 +62,24 @@ export function createCameraRig(camera, flightState) {
       CAMERA.pitchMax
     );
 
+    const rawYawSpeed = Math.abs(wrapAngle(yaw - prevYaw)) / dt;
+    prevYaw = yaw;
+    yawSpeed += (rawYawSpeed - yawSpeed) * (1 - damp(CAMERA_FRAME.yawSpeedResponse, dt));
+
+    _bee.copy(s.position);
+
     const speedRatio = typeof s.speedRatio === "number" ? s.speedRatio : 0;
     const boost = typeof s.boostAmount === "number" ? s.boostAmount : 0;
 
     const cp = Math.cos(pitch);
     _dir.set(-Math.sin(yaw) * cp, Math.sin(pitch), -Math.cos(yaw) * cp).normalize();
 
-    _vel.copy(s.velocity || _vel.set(0, 0, 0));
-    const accX = (_vel.x - _prevVel.x) / dt;
-    const accY = (_vel.y - _prevVel.y) / dt;
-    const accZ = (_vel.z - _prevVel.z) / dt;
-    _prevVel.copy(_vel);
+    if (s.velocity) _vel.copy(s.velocity);
+    else _vel.set(0, 0, 0);
+    if (s.acceleration) _acc.copy(s.acceleration);
+    else _acc.set(0, 0, 0);
 
-    _lag.set(accX, accY * 0.4, accZ).multiplyScalar(-CAMERA.accelLag);
+    _lag.set(_acc.x, _acc.y * 0.4, _acc.z).multiplyScalar(-CAMERA.accelLag);
     if (_lag.lengthSq() > CAMERA.accelLagMax * CAMERA.accelLagMax) {
       _lag.setLength(CAMERA.accelLagMax);
     }
@@ -72,7 +88,7 @@ export function createCameraRig(camera, flightState) {
     const dist = CAMERA.distance + speedRatio * CAMERA.distanceSpeedGain + boost * CAMERA.distanceBoostGain;
     const height = CAMERA.height + speedRatio * CAMERA.heightSpeedGain;
 
-    _desired.copy(s.position);
+    _desired.copy(_bee);
     _desired.addScaledVector(_dir, -dist);
     _desired.y += height;
     _desired.add(lagVel);
@@ -80,11 +96,12 @@ export function createCameraRig(camera, flightState) {
     if (!started) {
       started = true;
       pos.copy(_desired);
-      look.copy(s.position);
-      _prevVel.copy(_vel);
+      look.copy(_bee);
     }
 
-    const w = CAMERA.posStiffness;
+    const boostStiff =
+      1 + Math.min(1, yawSpeed / CAMERA_FRAME.yawStiffnessRef) * CAMERA_FRAME.yawStiffnessGain;
+    const w = CAMERA.posStiffness * boostStiff;
     const zeta = CAMERA.posDamping;
     posVel.x += (w * w * (_desired.x - pos.x) - 2 * zeta * w * posVel.x) * dt;
     posVel.y += (w * w * (_desired.y - pos.y) - 2 * zeta * w * posVel.y) * dt;
@@ -97,7 +114,7 @@ export function createCameraRig(camera, flightState) {
       if (posVel.y < 0) posVel.y = 0;
     }
 
-    _lookTarget.copy(s.position);
+    _lookTarget.copy(_bee);
     _lookTarget.y += CAMERA.lookUp;
     const vLen = _vel.length();
     if (vLen > 0.35) {
@@ -119,6 +136,25 @@ export function createCameraRig(camera, flightState) {
 
     camera.up.set(0, 1, 0);
     camera.lookAt(look);
+
+    _toBee.copy(_bee).sub(camera.position);
+    _toBee.y += CAMERA_FRAME.aimHeight;
+    const beeDist = _toBee.length();
+    if (beeDist > 1e-3) {
+      _toBee.multiplyScalar(1 / beeDist);
+      _camFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+      const angle = Math.acos(MathUtils.clamp(_camFwd.dot(_toBee), -1, 1));
+      if (angle > CAMERA_FRAME.centerSoftAngle) {
+        let allowed =
+          CAMERA_FRAME.centerSoftAngle +
+          (angle - CAMERA_FRAME.centerSoftAngle) * CAMERA_FRAME.centerFalloff;
+        if (allowed > CAMERA_FRAME.centerHardAngle) allowed = CAMERA_FRAME.centerHardAngle;
+        const t = MathUtils.clamp((angle - allowed) / angle, 0, 1);
+        _camFwd.lerp(_toBee, t).normalize();
+        look.copy(camera.position).addScaledVector(_camFwd, Math.max(beeDist, 1));
+        camera.lookAt(look);
+      }
+    }
 
     const rollTarget =
       (typeof s.bank === "number" ? s.bank : 0) * CAMERA.bankInfluence +

@@ -28,6 +28,7 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.shadowMap.autoUpdate = true;
+renderer.localClippingEnabled = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(PALETTE.skyHorizon);
@@ -202,6 +203,30 @@ async function boot() {
   const queen = createQueen ? createQueen(scene, assets) : null;
   const flowers = createFlowers ? createFlowers(scene, terrain) : null;
   const hive = createHive ? createHive(scene, terrain, assets) : null;
+
+  let interior = null;
+  let portal = null;
+  if (hive) {
+    try {
+      const [interiorModule, portalModule] = await Promise.all([
+        import('./nest/interior.js'),
+        import('./nest/portal.js'),
+      ]);
+      interior = interiorModule.createInterior(scene, hive, assets, terrain);
+      interior.attachColliders(terrain);
+      portal = portalModule.createPortal(scene, interior, flight, [
+        grass && grass.grass,
+        grass && grass.stones,
+        grass && grass.tufts,
+        ...(flowers && Array.isArray(flowers.flowers) ? flowers.flowers.map((g) => g && g.mesh) : []),
+      ]);
+    } catch (error) {
+      console.warn('[main] hollow interior unavailable —', error && error.message);
+      interior = null;
+      portal = null;
+    }
+  }
+
   const resources = createResources();
   const gather = flowers && hive ? createGather(flowers, resources, flight, hive) : null;
   const gameHud = createGameHud();
@@ -249,6 +274,7 @@ async function boot() {
     input.update(dt);
     const cameraYaw = rig && typeof rig.yaw === 'number' ? rig.yaw : input.yaw;
     flight.update(dt, input, cameraYaw);
+    if (portal) portal.update(dt);
     if (gather) gather.update(dt, input);
   });
 
@@ -257,6 +283,7 @@ async function boot() {
     if (grass && typeof grass.update === 'function') grass.update(dt, camera.position, elapsed);
     if (queen && typeof queen.update === 'function') queen.update(dt, flight, elapsed);
     if (rig && typeof rig.update === 'function') rig.update(dt, input, flight);
+    if (interior && portal) interior.clampCamera(camera, portal.state.insideness);
     if (flowers && typeof flowers.update === 'function') flowers.update(dt, flight.position, elapsed);
     if (hive && typeof hive.update === 'function') hive.update(dt, elapsed);
     if (gather) gameHud.update(dt, { gather: gather.state, resources: resources.snapshot() });
@@ -286,7 +313,11 @@ async function boot() {
       (missingModules.length ? `\nmissing ${missingModules.join(' ')}` : '');
   });
 
-  window.hollowtree = { renderer, scene, camera, terrain, sky, grass, flight, rig, queen, input, loop, assets };
+  window.hollowtree = {
+    renderer, scene, camera, terrain, sky, grass, flight, rig, queen, input, loop, assets,
+    hive,
+    nest: interior ? { interior, portal, grid: interior.grid, spec: interior.spec } : null,
+  };
 
   setProgress(1);
   renderer.render(scene, camera);

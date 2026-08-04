@@ -1,13 +1,14 @@
 // Hollowtree — queen flight kinematics: thrust, drag, banking, hover bob, terrain follow. Pure state, no rendering.
 
 import { Vector3, Quaternion, Euler, MathUtils } from "three";
-import { FLIGHT } from "../config.js";
+import { FLIGHT, FLIGHT_FEEL, LOOP } from "../config.js";
 
 const _wish = new Vector3();
 const _fwd = new Vector3();
 const _right = new Vector3();
 const _closest = new Vector3();
 const _normal = new Vector3();
+const _accel = new Vector3();
 const _euler = new Euler(0, 0, 0, "YXZ");
 
 function wrapAngle(a) {
@@ -34,13 +35,24 @@ function boxOf(c) {
 }
 
 export function createFlight(terrain) {
-  const position = new Vector3(0, FLIGHT.minAltitude + 2.5, 0);
+  const base = new Vector3(0, FLIGHT.minAltitude + 2.5, 0);
   const velocity = new Vector3();
-  const quaternion = new Quaternion();
+  const acceleration = new Vector3();
+  const prevVelocity = new Vector3();
+  const simQuaternion = new Quaternion();
 
-  const base = position.clone();
-  const lastExposed = position.clone();
-  const prevPlanar = new Vector3();
+  const prevPos = base.clone();
+  const curPos = base.clone();
+  const prevQuat = new Quaternion();
+  const curQuat = new Quaternion();
+  const renderPosition = base.clone();
+  const renderQuaternion = new Quaternion();
+
+  const stepTime = 1 / LOOP.fixedHz;
+  let simTime = 0;
+  let wallEpoch = -1;
+  let prevBob = 0;
+  let curBob = 0;
 
   let heading = 0;
   let yawRate = 0;
@@ -51,6 +63,8 @@ export function createFlight(terrain) {
   let boostAmount = 0;
   let boostSurge = 0;
   let liftDrive = 0;
+  let fwdDrive = 0;
+  let strafeDrive = 0;
   let fwdAccelSmooth = 0;
   let bobPhase = Math.random() * Math.PI * 2;
   let bobOffset = 0;
@@ -114,10 +128,34 @@ export function createFlight(terrain) {
     }
   }
 
+  function renderAlpha() {
+    if (wallEpoch < 0) return 1;
+    const now = performance.now() * 0.001;
+    const a = (now - wallEpoch - simTime) / stepTime;
+    if (!(a > 0)) {
+      wallEpoch = now - simTime;
+      return 0;
+    }
+    if (a > 1) {
+      wallEpoch = now - simTime - stepTime;
+      return 1;
+    }
+    return a;
+  }
+
+  function sampleRender() {
+    const a = renderAlpha();
+    renderPosition.lerpVectors(prevPos, curPos, a);
+    renderPosition.y += prevBob + (curBob - prevBob) * a;
+    renderQuaternion.slerpQuaternions(prevQuat, curQuat, a);
+    state.alpha = a;
+    return a;
+  }
+
   const state = {
-    position,
     velocity,
-    quaternion,
+    acceleration,
+    simPosition: base,
     bank: 0,
     pitch: 0,
     yawRate: 0,
@@ -128,9 +166,19 @@ export function createFlight(terrain) {
     boostAmount: 0,
     hoverFactor: 0,
     bob: 0,
+    alpha: 1,
     grounded: false,
     altitude: 0,
     terrain,
+    get position() {
+      sampleRender();
+      return renderPosition;
+    },
+    get quaternion() {
+      sampleRender();
+      return renderQuaternion;
+    },
+    sample: sampleRender,
     update,
   };
 
@@ -145,8 +193,6 @@ export function createFlight(terrain) {
     const inB = input && input.boost ? 1 : 0;
     const yawRef = typeof cameraYaw === "number" ? cameraYaw : heading;
 
-    if (position.distanceToSquared(lastExposed) > 1e-6) base.copy(position);
-
     const prevBoost = boostAmount;
     boostAmount += (inB - boostAmount) * (1 - damp(FLIGHT.boostResponse, dt));
     if (boostAmount - prevBoost > 0.0005 && boostAmount < 0.85) {
@@ -155,21 +201,28 @@ export function createFlight(terrain) {
     boostSurge *= damp(FLIGHT.boostSurgeDecay, dt);
 
     const maxSpeed = MathUtils.lerp(FLIGHT.maxSpeed, FLIGHT.boostSpeed, boostAmount);
-    const accel =
+    const accelBase =
       MathUtils.lerp(FLIGHT.accel, FLIGHT.boostAccel, boostAmount) *
       (1 + boostSurge * (FLIGHT.boostSurge - 1));
 
     _fwd.set(-Math.sin(yawRef), 0, -Math.cos(yawRef));
     _right.set(Math.cos(yawRef), 0, -Math.sin(yawRef));
 
-    const f = inF >= 0 ? inF : inF * FLIGHT.reverseScale;
-    const s = inS * FLIGHT.strafeScale;
-    _wish.set(0, 0, 0).addScaledVector(_fwd, f).addScaledVector(_right, s);
+    const fTarget = inF >= 0 ? inF : inF * FLIGHT.reverseScale;
+    const sTarget = inS * FLIGHT.strafeScale;
+    fwdDrive += (fTarget - fwdDrive) * (1 - damp(FLIGHT_FEEL.throttleSpool, dt));
+    strafeDrive += (sTarget - strafeDrive) * (1 - damp(FLIGHT_FEEL.strafeSpool, dt));
+
+    _wish.set(0, 0, 0).addScaledVector(_fwd, fwdDrive).addScaledVector(_right, strafeDrive);
     const wishLen = _wish.length();
     if (wishLen > 1) _wish.multiplyScalar(1 / wishLen);
     const throttle = Math.min(wishLen, 1);
 
-    prevPlanar.set(velocity.x, 0, velocity.z);
+    const driveSum = Math.abs(fwdDrive) + Math.abs(strafeDrive);
+    const lateralShare = driveSum > 1e-4 ? Math.abs(strafeDrive) / driveSum : 0;
+    const accel = accelBase * MathUtils.lerp(1, FLIGHT_FEEL.strafeAccelScale, lateralShare);
+
+    prevVelocity.copy(velocity);
 
     velocity.x += _wish.x * accel * dt;
     velocity.z += _wish.z * accel * dt;
@@ -219,25 +272,45 @@ export function createFlight(terrain) {
 
     resolveColliders(base, velocity, FLIGHT.bodyRadius);
 
+    const headingPrev = heading;
     const turnCap = FLIGHT.turnRate * (1 + boostAmount * (FLIGHT.turnRateBoost - 1));
     const delta = wrapAngle(yawRef - heading);
     const desiredRate = MathUtils.clamp(delta * FLIGHT.turnSharpness, -turnCap, turnCap);
     yawRate += (desiredRate - yawRate) * (1 - damp(FLIGHT.turnSmoothing, dt));
     heading = wrapAngle(heading + yawRate * dt);
 
+    let err = wrapAngle(yawRef - heading);
+    const errAbs = Math.abs(err);
+    if (errAbs > FLIGHT_FEEL.headingErrorMax) {
+      const over = errAbs - FLIGHT_FEEL.headingErrorMax;
+      heading = wrapAngle(heading + Math.sign(err) * over * (1 - damp(FLIGHT_FEEL.headingCatchUp, dt)));
+      err = wrapAngle(yawRef - heading);
+      if (Math.abs(err) > FLIGHT_FEEL.headingErrorHard) {
+        heading = wrapAngle(yawRef - Math.sign(err) * FLIGHT_FEEL.headingErrorHard);
+      }
+    }
+
+    const effYawRate = wrapAngle(heading - headingPrev) / dt;
+    yawRate = effYawRate;
+
     planar = Math.hypot(velocity.x, velocity.z);
     const speedRatio = MathUtils.clamp(planar / FLIGHT.maxSpeed, 0, 1.6);
 
-    const dvx = velocity.x - prevPlanar.x;
-    const dvz = velocity.z - prevPlanar.z;
-    const fwdAccel = (dvx * _fwd.x + dvz * _fwd.z) / dt;
+    _accel.set(
+      (velocity.x - prevVelocity.x) / dt,
+      (velocity.y - prevVelocity.y) / dt,
+      (velocity.z - prevVelocity.z) / dt
+    );
+    acceleration.lerp(_accel, 1 - damp(FLIGHT.accelSmoothing, dt));
+
+    const fwdAccel = _accel.x * _fwd.x + _accel.z * _fwd.z;
     fwdAccelSmooth += (fwdAccel - fwdAccelSmooth) * (1 - damp(FLIGHT.accelSmoothing, dt));
 
     hoverFactor = 1 - smoothstep(FLIGHT.hoverSpeedRange * 0.15, FLIGHT.hoverSpeedRange, planar);
 
     let bankTarget =
-      yawRate * planar * FLIGHT.bankFromTurn +
-      inS * FLIGHT.bankFromStrafe * (0.35 + speedRatio * 0.65);
+      effYawRate * planar * FLIGHT.bankFromTurn +
+      strafeDrive * FLIGHT.bankFromStrafe * (FLIGHT_FEEL.bankStrafeFloor + speedRatio * (1 - FLIGHT_FEEL.bankStrafeFloor));
     bankTarget += Math.sin(clock * FLIGHT.hoverWobbleFreq * Math.PI * 2) * FLIGHT.hoverWobbleAmp * hoverFactor;
     bankTarget = MathUtils.clamp(bankTarget, -FLIGHT.bankMax, FLIGHT.bankMax);
 
@@ -264,15 +337,21 @@ export function createFlight(terrain) {
     bobOffset += (bobTarget - bobOffset) * (1 - damp(FLIGHT.hoverBobResponse, dt));
 
     _euler.set(pitch, heading, bank, "YXZ");
-    quaternion.setFromEuler(_euler);
+    simQuaternion.setFromEuler(_euler);
 
-    position.copy(base);
-    position.y += bobOffset;
-    lastExposed.copy(position);
+    prevPos.copy(curPos);
+    curPos.copy(base);
+    prevQuat.copy(curQuat);
+    curQuat.copy(simQuaternion);
+    prevBob = curBob;
+    curBob = bobOffset;
+
+    simTime += dt;
+    if (wallEpoch < 0) wallEpoch = performance.now() * 0.001 - simTime;
 
     state.bank = bank;
     state.pitch = pitch;
-    state.yawRate = yawRate;
+    state.yawRate = effYawRate;
     state.heading = heading;
     state.speed = velocity.length();
     state.planarSpeed = planar;
@@ -282,11 +361,15 @@ export function createFlight(terrain) {
     state.bob = bobOffset;
     state.grounded = grounded;
     state.altitude = base.y - groundHeight(base.x, base.z);
+    state.alpha = 1;
     return state;
   }
 
   _euler.set(0, 0, 0);
-  quaternion.setFromEuler(_euler);
+  simQuaternion.setFromEuler(_euler);
+  curQuat.copy(simQuaternion);
+  prevQuat.copy(simQuaternion);
+  renderQuaternion.copy(simQuaternion);
 
   return state;
 }

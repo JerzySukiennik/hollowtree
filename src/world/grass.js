@@ -1,7 +1,7 @@
 // Hollowtree — instanced grass field with vertex-shader wind, toroidal recycling around the player, plus stone/tuft clutter.
 
 import * as THREE from 'three';
-import { CLUTTER, GRASS, GRASS_DETAIL, PALETTE } from '../config.js';
+import { CLUTTER, CLUTTER_EXCLUSION, GRASS, GRASS_DETAIL, PALETTE } from '../config.js';
 
 function rng(seed) {
   let s = seed >>> 0;
@@ -244,7 +244,88 @@ export function createGrass(scene, terrain) {
       cy[i] = cr() * Math.PI * 2;
       cs[i] = scale * (0.6 + cr() * 0.9);
     }
-    clutter.push({ mesh, n, radius, bx, bz, cy, cs });
+    clutter.push({ mesh, n, radius, bx, bz, cy, cs, blocks: mesh === stones });
+  }
+
+  const exCell = CLUTTER_EXCLUSION.cell;
+  const exPer = CLUTTER_EXCLUSION.perCell;
+  const exHalf = Math.ceil((CLUTTER.stoneRadius + exCell * 2) / exCell);
+  const exSpan = exHalf * 2 + 1;
+  const exCount = new Uint8Array(exSpan * exSpan);
+  const exX = new Float32Array(exSpan * exSpan * exPer);
+  const exZ = new Float32Array(exSpan * exSpan * exPer);
+  const exR2 = new Float32Array(exSpan * exSpan * exPer);
+  const exBoxes = new Float32Array(CLUTTER_EXCLUSION.maxBoxes * 4);
+  let exBoxCount = 0;
+  let exOx = 0;
+  let exOz = 0;
+
+  function exReset(px, pz) {
+    exOx = Math.floor(px / exCell) - exHalf;
+    exOz = Math.floor(pz / exCell) - exHalf;
+    exCount.fill(0);
+  }
+
+  function exAdd(wx, wz, r) {
+    const gx = Math.floor(wx / exCell) - exOx;
+    const gz = Math.floor(wz / exCell) - exOz;
+    if (gx < 0 || gz < 0 || gx >= exSpan || gz >= exSpan) return;
+    const c = gz * exSpan + gx;
+    const n = exCount[c];
+    if (n >= exPer) return;
+    const o = c * exPer + n;
+    exX[o] = wx;
+    exZ[o] = wz;
+    exR2[o] = r * r;
+    exCount[c] = n + 1;
+  }
+
+  function exCollectBoxes(px, pz) {
+    exBoxCount = 0;
+    const list = terrain && Array.isArray(terrain.colliders) ? terrain.colliders : null;
+    if (!list) return;
+    const range = CLUTTER_EXCLUSION.boxRange;
+    const pad = CLUTTER_EXCLUSION.boxPadding;
+    for (let i = 0; i < list.length && exBoxCount < CLUTTER_EXCLUSION.maxBoxes; i++) {
+      const b = list[i];
+      if (!b || !b.min || !b.max) continue;
+      const cx = (b.min.x + b.max.x) * 0.5;
+      const cz = (b.min.z + b.max.z) * 0.5;
+      if (Math.hypot(cx - px, cz - pz) > range) continue;
+      if (b.min.y > getHeight(cx, cz) + CLUTTER_EXCLUSION.boxGroundBand) continue;
+      if (b.max.x - b.min.x < CLUTTER_EXCLUSION.boxMinSize) continue;
+      const o = exBoxCount * 4;
+      exBoxes[o] = b.min.x - pad;
+      exBoxes[o + 1] = b.max.x + pad;
+      exBoxes[o + 2] = b.min.z - pad;
+      exBoxes[o + 3] = b.max.z + pad;
+      exBoxCount++;
+    }
+  }
+
+  function exBlocked(wx, wz) {
+    const gx = Math.floor(wx / exCell) - exOx;
+    const gz = Math.floor(wz / exCell) - exOz;
+    if (gx > 0 && gz > 0 && gx < exSpan - 1 && gz < exSpan - 1) {
+      for (let j = -1; j <= 1; j++) {
+        const row = (gz + j) * exSpan + gx;
+        for (let k = -1; k <= 1; k++) {
+          const c = row + k;
+          const n = exCount[c];
+          for (let e = 0; e < n; e++) {
+            const o = c * exPer + e;
+            const dx = wx - exX[o];
+            const dz = wz - exZ[o];
+            if (dx * dx + dz * dz < exR2[o]) return true;
+          }
+        }
+      }
+    }
+    for (let b = 0; b < exBoxCount; b++) {
+      const o = b * 4;
+      if (wx > exBoxes[o] && wx < exBoxes[o + 1] && wz > exBoxes[o + 2] && wz < exBoxes[o + 3]) return true;
+    }
+    return false;
   }
 
   const getHeight = terrain.getHeight;
@@ -277,7 +358,7 @@ export function createGrass(scene, terrain) {
 
     const cut = cutoff[i];
     const vis = 1 - smoothstep(cut - GRASS_DETAIL.fadeSoftness, cut + GRASS_DETAIL.fadeSoftness, dist);
-    if (vis > 0.002) {
+    if (vis > 0.002 && !exBlocked(wx, wz)) {
       const h = getHeight(wx, wz);
       const hx = getHeight(wx + 1.1, wz);
       const hz = getHeight(wx, wz + 1.1);
@@ -313,6 +394,8 @@ export function createGrass(scene, terrain) {
   }
 
   function updateClutter(px, pz) {
+    exReset(px, pz);
+    exCollectBoxes(px, pz);
     for (const c of clutter) {
       const a = c.mesh.instanceMatrix.array;
       const dd = c.radius * 2;
@@ -327,6 +410,7 @@ export function createGrass(scene, terrain) {
         const o = i * 16;
         const fade = Math.min(1, Math.max(0, (c.radius - dist) / 16));
         const sc = c.cs[i] * fade;
+        if (c.blocks && sc > 0.01) exAdd(wx, wz, sc * CLUTTER_EXCLUSION.stoneClearance);
         const ang = c.cy[i];
         const cc = Math.cos(ang) * sc;
         const ss = Math.sin(ang) * sc;
@@ -339,8 +423,8 @@ export function createGrass(scene, terrain) {
     }
   }
 
-  refreshAll(0, 0);
   updateClutter(0, 0);
+  refreshAll(0, 0);
 
   return {
     grass,

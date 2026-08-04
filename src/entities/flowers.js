@@ -1,7 +1,10 @@
-// Hollowtree — instanced flower field: per-species geometry, finite reserves, visible depletion and regrowth.
+// Hollowtree — instanced flower field: authored GLB per species, bee-scale placement, finite reserves, visible depletion and regrowth.
 
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FLOWERS, FLOWER_SPECIES, HIVE } from '../config.js';
+
+const loader = new GLTFLoader();
 
 function rng(seed) {
   let s = seed >>> 0;
@@ -16,114 +19,8 @@ function smoothstep(a, b, x) {
   return t * t * (3 - 2 * t);
 }
 
-function pushColor(col, c, m) {
-  col.push(c.r * m, c.g * m, c.b * m);
-}
-
-function stemStrip(buf, angle, height, width, tint) {
-  const { pos, nrm, col, idx } = buf;
-  const base = pos.length / 3;
-  const cx = Math.cos(angle) * width;
-  const cz = Math.sin(angle) * width;
-  pos.push(-cx, 0, -cz, cx, 0, cz, -cx * 0.58, height, -cz * 0.58, cx * 0.58, height, cz * 0.58);
-  for (let i = 0; i < 4; i++) nrm.push(-Math.sin(angle), 0.42, Math.cos(angle));
-  pushColor(col, tint, 0.58);
-  pushColor(col, tint, 0.58);
-  pushColor(col, tint, 1.0);
-  pushColor(col, tint, 1.0);
-  idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
-}
-
-function petalRing(buf, cfg) {
-  const { pos, nrm, col, idx } = buf;
-  for (let p = 0; p < cfg.count; p++) {
-    const a = (p / cfg.count) * Math.PI * 2 + cfg.offset;
-    const dx = Math.cos(a);
-    const dz = Math.sin(a);
-    const sx = -dz;
-    const sz = dx;
-    const base = pos.length / 3;
-    const wi = cfg.width * 0.5;
-    const wo = cfg.width * 0.3;
-    pos.push(
-      dx * cfg.inner + sx * wi, cfg.y, dz * cfg.inner + sz * wi,
-      dx * cfg.inner - sx * wi, cfg.y, dz * cfg.inner - sz * wi,
-      dx * cfg.outer + sx * wo, cfg.y + cfg.lift, dz * cfg.outer + sz * wo,
-      dx * cfg.outer - sx * wo, cfg.y + cfg.lift, dz * cfg.outer - sz * wo
-    );
-    const nl = Math.hypot(dx * cfg.cup, 1, dz * cfg.cup);
-    for (let v = 0; v < 4; v++) nrm.push((-dx * cfg.cup) / nl, 1 / nl, (-dz * cfg.cup) / nl);
-    pushColor(col, cfg.color, 0.88);
-    pushColor(col, cfg.color, 0.88);
-    pushColor(col, cfg.tip, 1.0);
-    pushColor(col, cfg.tip, 1.0);
-    idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
-  }
-}
-
-function discFan(buf, cfg) {
-  const { pos, nrm, col, idx } = buf;
-  const base = pos.length / 3;
-  pos.push(0, cfg.y + cfg.dome, 0);
-  nrm.push(0, 1, 0);
-  pushColor(col, cfg.color, 1.15);
-  for (let i = 0; i < cfg.segments; i++) {
-    const a = (i / cfg.segments) * Math.PI * 2;
-    pos.push(Math.cos(a) * cfg.radius, cfg.y, Math.sin(a) * cfg.radius);
-    nrm.push(Math.cos(a) * 0.4, 0.92, Math.sin(a) * 0.4);
-    pushColor(col, cfg.color, 0.82);
-  }
-  for (let i = 0; i < cfg.segments; i++) {
-    idx.push(base, base + 1 + ((i + 1) % cfg.segments), base + 1 + i);
-  }
-}
-
-function domeShell(buf, cfg) {
-  const { pos, nrm, col, idx } = buf;
-  const base = pos.length / 3;
-  const rings = cfg.rings;
-  const seg = cfg.segments;
-  for (let r = 0; r <= rings; r++) {
-    const t = r / rings;
-    const phi = t * Math.PI * 0.5;
-    const rr = Math.cos(phi) * cfg.radius;
-    const yy = cfg.y + Math.sin(phi) * cfg.height;
-    for (let i = 0; i < seg; i++) {
-      const a = (i / seg) * Math.PI * 2 + t * 0.35;
-      pos.push(Math.cos(a) * rr, yy, Math.sin(a) * rr);
-      const nl = Math.hypot(Math.cos(a) * 0.8, 0.6, Math.sin(a) * 0.8);
-      nrm.push((Math.cos(a) * 0.8) / nl, 0.6 / nl, (Math.sin(a) * 0.8) / nl);
-      const c = t < 0.5 ? cfg.color : cfg.tip;
-      pushColor(col, c, 0.78 + t * 0.42);
-    }
-  }
-  for (let r = 0; r < rings; r++) {
-    for (let i = 0; i < seg; i++) {
-      const a0 = base + r * seg + i;
-      const a1 = base + r * seg + ((i + 1) % seg);
-      const b0 = a0 + seg;
-      const b1 = a1 + seg;
-      idx.push(a0, b0, a1, a1, b0, b1);
-    }
-  }
-}
-
-function bellShell(buf, cfg) {
-  const { pos, nrm, col, idx } = buf;
-  const base = pos.length / 3;
-  pos.push(0, cfg.y + cfg.height, 0);
-  nrm.push(0, 1, 0);
-  pushColor(col, cfg.core, 0.9);
-  for (let i = 0; i < cfg.segments; i++) {
-    const a = (i / cfg.segments) * Math.PI * 2;
-    pos.push(Math.cos(a) * cfg.radius, cfg.y, Math.sin(a) * cfg.radius);
-    const nl = Math.hypot(Math.cos(a), 0.5, Math.sin(a));
-    nrm.push(Math.cos(a) / nl, 0.5 / nl, Math.sin(a) / nl);
-    pushColor(col, i % 2 === 0 ? cfg.color : cfg.tip, 1.0);
-  }
-  for (let i = 0; i < cfg.segments; i++) {
-    idx.push(base, base + 1 + i, base + 1 + ((i + 1) % cfg.segments));
-  }
+function newBuffer() {
+  return { pos: [], nrm: [], col: [], idx: [] };
 }
 
 function finalize(buf) {
@@ -136,77 +33,133 @@ function finalize(buf) {
   return g;
 }
 
-function newBuffer() {
-  return { pos: [], nrm: [], col: [], idx: [] };
+function PLACEHOLDER_ribbon(buf, x0, z0, y0, x1, z1, y1, w, tint) {
+  const { pos, nrm, col, idx } = buf;
+  for (let k = 0; k < 2; k++) {
+    const a = k * Math.PI * 0.5;
+    const cx = Math.cos(a) * w;
+    const cz = Math.sin(a) * w;
+    const base = pos.length / 3;
+    pos.push(
+      x0 - cx, y0, z0 - cz,
+      x0 + cx, y0, z0 + cz,
+      x1 - cx * 0.5, y1, z1 - cz * 0.5,
+      x1 + cx * 0.5, y1, z1 + cz * 0.5
+    );
+    for (let i = 0; i < 4; i++) nrm.push(0, 1, 0);
+    for (let i = 0; i < 4; i++) col.push(tint.r * (i < 2 ? 0.6 : 1), tint.g * (i < 2 ? 0.6 : 1), tint.b * (i < 2 ? 0.6 : 1));
+    idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+  }
 }
 
-function daisyGeometry(species) {
+function PLACEHOLDER_head(buf, cx, cz, y, radius, seg, petal, core) {
+  const { pos, nrm, col, idx } = buf;
+  const base = pos.length / 3;
+  pos.push(cx, y + radius * 0.32, cz);
+  nrm.push(0, 1, 0);
+  col.push(core.r, core.g, core.b);
+  for (let i = 0; i < seg; i++) {
+    const a = (i / seg) * Math.PI * 2;
+    pos.push(cx + Math.cos(a) * radius, y, cz + Math.sin(a) * radius);
+    nrm.push(0, 1, 0);
+    col.push(petal.r, petal.g, petal.b);
+  }
+  for (let i = 0; i < seg; i++) idx.push(base, base + 1 + ((i + 1) % seg), base + 1 + i);
+}
+
+function PLACEHOLDER_flowerGeometry(species) {
   const c = species.colors;
   const petal = new THREE.Color(c.petal);
-  const tip = new THREE.Color(c.tip);
-  const core = new THREE.Color(c.core);
+  const core = new THREE.Color(c.core || c.tip);
   const stem = new THREE.Color(c.stem);
   const buf = newBuffer();
-  stemStrip(buf, 0, 0.70, 0.018, stem);
-  stemStrip(buf, Math.PI * 0.5, 0.66, 0.016, stem);
-  petalRing(buf, {
-    count: species.petals,
-    offset: 0.2,
-    inner: 0.055,
-    outer: 0.235,
-    width: 0.105,
-    y: 0.70,
-    lift: 0.028,
-    cup: 0.55,
-    color: petal,
-    tip,
+  const heads = Math.max(1, species.heads || 1);
+  const h = species.height;
+  const r = species.headRadius;
+  PLACEHOLDER_ribbon(buf, 0, 0, 0, 0, 0, species.headHeight, h * 0.022, stem);
+  PLACEHOLDER_head(buf, 0, 0, species.headHeight, r, 7, petal, core);
+  for (let i = 1; i < heads; i++) {
+    const a = (i / (heads - 1 || 1)) * Math.PI * 2 + 0.6;
+    const sp = species.spread * (0.55 + 0.45 * ((i * 7) % 5) / 5);
+    const hy = species.headHeight * (0.62 + 0.22 * ((i * 3) % 4) / 4);
+    const bx = Math.cos(a) * sp;
+    const bz = Math.sin(a) * sp;
+    PLACEHOLDER_ribbon(buf, 0, 0, h * 0.24, bx, bz, hy, h * 0.016, stem);
+    PLACEHOLDER_head(buf, bx, bz, hy, r * 0.78, 6, petal, core);
+  }
+  return finalize(buf);
+}
+
+function mergeModel(root) {
+  root.updateMatrixWorld(true);
+  const buf = newBuffer();
+  const v = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  const nm = new THREE.Matrix3();
+  const c = new THREE.Color();
+  root.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    const g = child.geometry;
+    const p = g.attributes.position;
+    if (!p) return;
+    const base = buf.pos.length / 3;
+    nm.getNormalMatrix(child.matrixWorld);
+    const na = g.attributes.normal;
+    const ca = g.attributes.color;
+    const mat = Array.isArray(child.material) ? child.material[0] : child.material;
+    if (mat && mat.color) c.copy(mat.color);
+    else c.setRGB(1, 1, 1);
+    for (let i = 0; i < p.count; i++) {
+      v.fromBufferAttribute(p, i).applyMatrix4(child.matrixWorld);
+      buf.pos.push(v.x, v.y, v.z);
+      if (na) {
+        n.fromBufferAttribute(na, i).applyMatrix3(nm).normalize();
+        buf.nrm.push(n.x, n.y, n.z);
+      } else buf.nrm.push(0, 1, 0);
+      if (ca) buf.col.push(ca.getX(i) * c.r, ca.getY(i) * c.g, ca.getZ(i) * c.b);
+      else buf.col.push(c.r, c.g, c.b);
+    }
+    if (g.index) {
+      const ia = g.index;
+      for (let i = 0; i < ia.count; i++) buf.idx.push(base + ia.getX(i));
+    } else {
+      for (let i = 0; i < p.count; i++) buf.idx.push(base + i);
+    }
   });
-  discFan(buf, { y: 0.712, radius: 0.072, dome: 0.024, segments: 7, color: core });
+  if (!buf.pos.length) return null;
   return finalize(buf);
 }
 
-function cloverGeometry(species) {
-  const c = species.colors;
-  const petal = new THREE.Color(c.petal);
-  const tip = new THREE.Color(c.tip);
-  const stem = new THREE.Color(c.stem);
-  const buf = newBuffer();
-  stemStrip(buf, 0, 0.62, 0.019, stem);
-  stemStrip(buf, Math.PI * 0.5, 0.58, 0.017, stem);
-  domeShell(buf, { y: 0.60, radius: 0.135, height: 0.185, rings: 3, segments: 7, color: petal, tip });
-  return finalize(buf);
-}
-
-function bellGeometry(species) {
-  const c = species.colors;
-  const petal = new THREE.Color(c.petal);
-  const tip = new THREE.Color(c.tip);
-  const core = new THREE.Color(c.core);
-  const stem = new THREE.Color(c.stem);
-  const buf = newBuffer();
-  stemStrip(buf, 0, 0.88, 0.015, stem);
-  stemStrip(buf, Math.PI * 0.5, 0.84, 0.013, stem);
-  bellShell(buf, { y: 0.615, height: 0.265, radius: 0.135, segments: species.petals, color: petal, tip, core });
-  petalRing(buf, {
-    count: species.petals,
-    offset: 0.5,
-    inner: 0.115,
-    outer: 0.185,
-    width: 0.085,
-    y: 0.615,
-    lift: -0.055,
-    cup: -0.9,
-    color: tip,
-    tip: petal,
+function findAnchor(root, name) {
+  if (!name) return null;
+  const want = name.toLowerCase();
+  let found = null;
+  root.traverse((child) => {
+    if (found || !child.name) return;
+    const n = child.name.toLowerCase();
+    if (n === want || n.startsWith(`${want}_`) || n.startsWith(`${want}.`)) found = child;
   });
-  return finalize(buf);
+  return found;
 }
 
-const GEOMETRY_BUILDERS = {
-  daisy: daisyGeometry,
-  clover: cloverGeometry,
-  bell: bellGeometry,
-};
+async function fetchModel(file) {
+  const url = new URL(`${FLOWERS.modelPath}${file}`, new URL('../../', import.meta.url)).href;
+  let response;
+  try {
+    response = await fetch(url);
+  } catch (error) {
+    return null;
+  }
+  if (!response.ok) return null;
+  const buffer = await response.arrayBuffer();
+  const folder = url.slice(0, url.lastIndexOf('/') + 1);
+  try {
+    return await new Promise((res, rej) => loader.parse(buffer, folder, res, rej));
+  } catch (error) {
+    console.warn(`[flowers] failed to parse ${file} — ${error && error.message}`);
+    return null;
+  }
+}
 
 function flowerMaterial(uTime) {
   const mat = new THREE.MeshLambertMaterial({
@@ -261,6 +214,8 @@ export function createFlowers(scene, terrain) {
 
   const table = FLOWER_SPECIES;
   const total = FLOWERS.count;
+  const headOf = new Float32Array(table.length);
+  for (let s = 0; s < table.length; s++) headOf[s] = table[s].headHeight;
 
   const clusters = [];
   for (let i = 0; i < FLOWERS.clusterCount; i++) {
@@ -346,14 +301,13 @@ export function createFlowers(scene, terrain) {
   const groups = [];
   for (let s = 0; s < table.length; s++) {
     const species = table[s];
-    const builder = GEOMETRY_BUILDERS[species.geometry] || daisyGeometry;
-    const geometry = builder(species);
+    const geometry = PLACEHOLDER_flowerGeometry(species);
     const material = flowerMaterial(uTime);
     const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, counts[s]));
     mesh.name = `flowers:${species.id}`;
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.frustumCulled = false;
-    mesh.castShadow = false;
+    mesh.castShadow = Boolean(FLOWERS.castShadow);
     mesh.receiveShadow = true;
     mesh.matrixAutoUpdate = false;
     for (let i = 0; i < mesh.count; i++) mesh.setColorAt(i, new THREE.Color(1, 1, 1));
@@ -366,6 +320,7 @@ export function createFlowers(scene, terrain) {
       matrix: mesh.instanceMatrix.array,
       color: mesh.instanceColor.array,
       colorDirty: true,
+      authored: false,
     });
   }
 
@@ -452,12 +407,16 @@ export function createFlowers(scene, terrain) {
   let cursor = 0;
   const last = new THREE.Vector3();
 
+  function headY(i) {
+    return fy[i] + headOf[speciesOf[i]] * scale[i] * (1 - depletion[i] * FLOWERS.curlDroop);
+  }
+
   function fillHandle(i, dist) {
     const s = speciesOf[i];
     handle.index = i;
     handle.species = table[s];
     handle.speciesId = table[s].id;
-    handle.position.set(fx[i], fy[i] + 0.7 * scale[i], fz[i]);
+    handle.position.set(fx[i], headY(i), fz[i]);
     handle.distance = dist;
     handle.reserve = reserve[i];
     handle.reserveMax = reserveMax[i];
@@ -481,7 +440,7 @@ export function createFlowers(scene, terrain) {
           const i = bucket[b];
           if (reserve[i] <= FLOWERS.reserveEpsilon) continue;
           const dx = fx[i] - position.x;
-          const dy = fy[i] + 0.7 * scale[i] - position.y;
+          const dy = headY(i) - position.y;
           const dz = fz[i] - position.z;
           const dSq = dx * dx + dy * dy + dz * dz;
           if (dSq < bestSq) {
@@ -517,6 +476,49 @@ export function createFlowers(scene, terrain) {
       speciesId: species.id,
     };
   }
+
+  function adopt(s, gltf) {
+    const species = table[s];
+    const root = gltf.scene || gltf.scenes[0];
+    if (!root) return;
+    const anchor = findAnchor(root, species.headAnchor);
+    let anchorY = null;
+    if (anchor) {
+      root.updateMatrixWorld(true);
+      anchorY = anchor.getWorldPosition(new THREE.Vector3()).y;
+    }
+    const geometry = mergeModel(root);
+    if (!geometry) return;
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const raw = bb.max.y - bb.min.y;
+    const k = raw > 1e-4 ? species.height / raw : 1;
+    geometry.translate(0, -bb.min.y, 0);
+    geometry.scale(k, k, k);
+    geometry.computeBoundingSphere();
+    headOf[s] = anchorY !== null ? (anchorY - bb.min.y) * k : species.headHeight;
+    const g = groups[s];
+    g.mesh.geometry.dispose();
+    g.mesh.geometry = geometry;
+    g.authored = true;
+  }
+
+  (async () => {
+    for (let s = 0; s < table.length; s++) {
+      const file = table[s].model;
+      if (!file) continue;
+      const gltf = await fetchModel(file);
+      if (!gltf) {
+        console.warn(`[flowers] ${file} not found — placeholder stand-in for "${table[s].id}"`);
+        continue;
+      }
+      try {
+        adopt(s, gltf);
+      } catch (error) {
+        console.warn(`[flowers] could not adopt ${file} — ${error && error.message}`);
+      }
+    }
+  })();
 
   function update(dt, playerPosition) {
     uTime.value += dt;
@@ -559,6 +561,7 @@ export function createFlowers(scene, terrain) {
     update,
     sampleNearest,
     drain,
+    headHeightOf: (s) => headOf[s],
     reserveOf: (i) => reserve[i],
     dispose() {
       for (const g of groups) {

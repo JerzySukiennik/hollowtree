@@ -6,6 +6,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 export const MANIFEST = {
   models: {
     queen: 'assets/models/queen.glb',
+    hollow: 'assets/models/hollow.glb',
   },
   textures: {},
 };
