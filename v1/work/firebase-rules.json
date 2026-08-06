@@ -1,0 +1,171 @@
+{
+  // Hollowtree — proposed Realtime Database rules for hollowtree-hive.
+  //
+  // This file is the net agent's PROPOSAL. The orchestrator owns database.rules.json
+  // in the repo root and merges/deploys from here. The shape below matches what is
+  // already live (/hives/$code with presence, queens, bank, world, comb) and only
+  // tightens it — no new subtrees are introduced, so the client needs no rule change
+  // to run today.
+  //
+  // Threat model. This project has NO Firebase Auth: anonymous sign-in requires
+  // Identity Platform, which requires billing, and billing stays off. So there is no
+  // auth.uid to key rules on. Access control is therefore the hive code itself: ten
+  // characters from a 32-glyph alphabet is ~50 bits, and the rules refuse any code
+  // shorter than eight. A player who has the code is a player who was invited.
+  //
+  // What the rules still buy us without auth:
+  //   * nothing outside /hives is reachable at all;
+  //   * only the five known subtrees exist, so nobody can park arbitrary data here;
+  //   * every value is type- and size-checked, so a bug or a bored visitor cannot
+  //     store a megabyte of junk or a NaN that breaks the season clock;
+  //   * timestamps may not be set into the future, which is what stops a client with
+  //     a fast clock from minting offline progression out of nothing;
+  //   * presence is capped at three queens, matching the design.
+  //
+  // What they cannot buy without auth, honestly stated: anyone holding the code can
+  // write as any uid. The game has no PvP, no ranking and one shared pool, so the
+  // worst case is a griefer who already had the invite. Enforcing "only your own
+  // queen" needs auth.uid; if that ever matters, the fix is billing + anonymous auth,
+  // not a cleverer rule.
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "hives": {
+      // $code — the hive code from the lobby. It is the invite AND the access control,
+      // so anything shorter than eight characters is refused outright.
+      "$code": {
+        ".read": "$code.length >= 8",
+        ".write": "$code.length >= 8",
+
+        // presence — one child per queen, removed by onDisconnect so a closed tab
+        // leaves no ghost. `at` is the heartbeat the stale-entry reaper reads.
+        "presence": {
+          ".validate": "newData.numChildren() <= 3",
+          "$uid": {
+            ".validate": "!newData.exists() || newData.hasChildren(['name', 'at'])",
+            "name": { ".validate": "newData.isString() && newData.val().length <= 24" },
+            "at": { ".validate": "newData.isNumber() && newData.val() <= now + 5000" },
+            "$other": { ".validate": false }
+          }
+        },
+
+        // queens — the authoritative state each client publishes for its own queen at
+        // ~10 Hz. `p` is one packed string (sequence, time, position, rotation,
+        // velocity, load). Individual bees are NEVER here: only the swarm's
+        // composition travels, under world/meta, and peers simulate the boids locally.
+        // The 160-character ceiling keeps a 10 Hz channel from becoming a bandwidth
+        // attack on the other two players.
+        "queens": {
+          ".validate": "newData.numChildren() <= 3",
+          "$uid": {
+            ".validate": "!newData.exists() || newData.hasChildren(['p'])",
+            "p": { ".validate": "newData.isString() && newData.val().length <= 160" },
+            "$other": { ".validate": false }
+          }
+        },
+
+        // bank — the single shared pool. Every mutation arrives as one runTransaction
+        // on this whole node, which is what makes a multi-resource purchase
+        // all-or-nothing and stops two queens depositing in the same second from
+        // clobbering each other. Flat numbers only, because that is what the live
+        // rules type this subtree as: balances (pollen/nectar/resin), the offline
+        // stamp `lastActive`, and per-resource offline rates as r_<kind>.
+        "bank": {
+          "lastActive": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= now + 5000" },
+          "$kind": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 1000000" }
+        },
+
+        // world — free-form by design, and the client keeps it namespaced:
+        //   world/epoch          number, written once, the origin of the season clock
+        //   world/host           string, first client to open the hollow
+        //   world/meta/<uid>     cosmetic, ready flag, swarm composition, join time
+        //   world/contrib/<uid>  per-queen contribution counters for the warm HUD stat
+        //   world/flowers/<id>   depletion and regrowth, driven by the one authority
+        //   world/hornets/<id>   seasonal event state
+        //   world/zones/<id>     unlocked zones
+        // epoch is write-once: the season, flower regrowth and hornet respawn all
+        // derive from it, so a client must not be able to rewind the world.
+        "world": {
+          "epoch": {
+            ".write": "!data.exists()",
+            ".validate": "newData.isNumber() && newData.val() <= now + 5000"
+          },
+          "host": { ".validate": "newData.isString() && newData.val().length <= 64" },
+          // lease — world-simulation ownership. Claimed and renewed by runTransaction
+          // with a server-checked expiry, so "exactly one owner" survives a frozen tab:
+          // a client that stops renewing drops its claim without needing to be told.
+          // exp may not be set further out than twice the lease length, or a client
+          // could park ownership indefinitely.
+          "lease": {
+            ".validate": "newData.hasChildren(['uid', 'exp'])",
+            "uid": { ".validate": "newData.isString() && newData.val().length <= 64" },
+            "exp": { ".validate": "newData.isNumber() && newData.val() <= now + 20000" },
+            "$other": { ".validate": false }
+          },
+          // weather — scheduled by the owner, stamped in server time so no client's
+          // own clock can shift the storm.
+          "weather": {
+            "kind": { ".validate": "newData.isString() && newData.val().length <= 24" },
+            "intensity": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 1" },
+            "seed": { ".validate": "newData.isNumber()" },
+            "durationMs": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+            "startedAt": { ".validate": "newData.isNumber() && newData.val() <= now + 5000" },
+            "$other": { ".validate": false }
+          },
+          "meta": {
+            "$uid": {
+              "c": { ".validate": "newData.isString() && newData.val().length <= 16" },
+              "k": { ".validate": "newData.isString() && newData.val().length <= 16" },
+              "r": { ".validate": "newData.isBoolean()" },
+              "j": { ".validate": "newData.isNumber() && newData.val() <= now + 5000" },
+              "s": {
+                "$type": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 1000" }
+              },
+              "$other": { ".validate": false }
+            }
+          },
+          "contrib": {
+            "$uid": {
+              // Monotonic: a contribution counter is a warm statistic, never a score
+              // to be edited downward.
+              "$kind": { ".validate": "newData.isNumber() && newData.val() >= 0 && (!data.exists() || newData.val() >= data.val())" }
+            }
+          },
+          "flowers": {
+            "$id": {
+              "a": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 10000" },
+              "d": { ".validate": "newData.isNumber() && newData.val() <= now + 5000" },
+              "$other": { ".validate": false }
+            }
+          },
+          "hornets": {
+            "$id": {
+              "s": { ".validate": "newData.isString() && newData.val().length <= 24" },
+              "t": { ".validate": "newData.isNumber()" },
+              "$other": { ".validate": false }
+            }
+          },
+          "zones": {
+            "$id": { ".validate": "newData.isBoolean() || newData.isNumber()" }
+          },
+          "$other": { ".validate": false }
+        },
+
+        // comb — the nest cells on the hex grid. Free-form in the live rules; the
+        // client writes one child per cell keyed by grid coordinate.
+        "comb": {
+          "$cell": {
+            "t": { ".validate": "newData.isString() && newData.val().length <= 24" },
+            "o": { ".validate": "newData.isString() && newData.val().length <= 64" },
+            "b": { ".validate": "newData.isNumber() && newData.val() <= now + 5000" },
+            "h": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 10000" },
+            "$other": { ".validate": false }
+          }
+        },
+
+        "$other": { ".validate": false }
+      }
+    }
+  }
+}

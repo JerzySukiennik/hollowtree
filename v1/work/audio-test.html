@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>audio-test: idle</title>
+<style>
+  body { margin: 0; background: #14100c; color: #f6e9cf; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 18px; }
+  button { font: inherit; background: #3a2c18; color: #f6e9cf; border: 1px solid #6b5330; padding: 8px 16px; cursor: pointer; margin: 0 6px 10px 0; }
+  pre { white-space: pre-wrap; }
+  .ok { color: #9ede8a; } .bad { color: #ff8b6b; }
+  label { display: inline-block; width: 120px; }
+  input[type=range] { width: 220px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<h3>Hollowtree audio — standalone harness</h3>
+<p>Autorun starts on load (decode + graph checks, no sound until you click Unlock).</p>
+<button id="unlock">Unlock &amp; play</button>
+<button id="storm">setWeather storm</button>
+<button id="rain">setWeather rain</button>
+<button id="clear">setWeather clear</button>
+<button id="deposit">play deposit</button>
+<button id="sting">music season</button>
+<button id="thunderNear">thunder(40)</button>
+<button id="thunderFar">thunder(420)</button>
+<div>
+  <label>insideness</label><input id="inside" type="range" min="0" max="1" step="0.01" value="0"><span id="insideV">0</span><br>
+  <label>speed</label><input id="speed" type="range" min="0" max="18" step="0.1" value="0"><span id="speedV">0</span><br>
+  <label>swarmSize</label><input id="swarm" type="range" min="0" max="200" step="1" value="0"><span id="swarmV">0</span><br>
+  <label>timeOfDay</label><input id="tod" type="range" min="0" max="1" step="0.01" value="0.5"><span id="todV">0.5</span><br>
+  <label>gathering</label><input id="gath" type="range" min="0" max="1" step="0.01" value="0"><span id="gathV">0</span><br>
+  <label>season</label>
+  <select id="season"><option>spring</option><option selected>summer</option><option>autumn</option><option>winter</option></select>
+</div>
+<div id="driven" style="margin:8px 0;opacity:.75"></div>
+<pre id="out">running…</pre>
+<script type="module">
+import { AUDIO } from '../src/config.audio.js';
+import { createAudio } from '../src/audio/index.js';
+
+const out = document.getElementById('out');
+const lines = [];
+let fails = 0;
+function log(ok, text) {
+  if (!ok) fails++;
+  lines.push((ok ? '  ok  ' : ' FAIL ') + text);
+  out.innerHTML = lines.map((l) => `<span class="${l.startsWith(' FAIL') ? 'bad' : 'ok'}">${l}</span>`).join('\n');
+  document.title = fails ? `audio-test: ${fails} FAIL` : `audio-test: ${lines.length} ok`;
+}
+
+const audio = createAudio(null);
+log(audio && audio.available, 'createAudio() returned a live system');
+for (const fn of ['unlock', 'update', 'setWeather', 'thunder', 'play', 'music', 'setVolumes', 'dispose']) {
+  log(typeof audio[fn] === 'function', `API exposes ${fn}()`);
+}
+log(audio.ready && typeof audio.ready.then === 'function', 'API exposes ready promise');
+log(audio.volumes && typeof audio.volumes.master === 'number', 'API exposes volumes');
+
+// must not throw before unlock
+try {
+  audio.update(0.016, { insideness: 0.5, speed: 5, swarmSize: 20, season: 'summer', timeOfDay: 0.4 });
+  audio.setWeather({ kind: 'storm', intensity: 1, wetness: 1 });
+  audio.play('deposit');
+  audio.music('season');
+  audio.thunder(120);
+  log(true, 'pre-unlock calls are silent no-ops (no throw)');
+  log(audio.weather.driven === true, 'weather.driven latched by setWeather() — internal thunder off');
+} catch (e) {
+  log(false, 'pre-unlock threw: ' + e.message);
+}
+
+const ids = Object.keys(AUDIO.manifest);
+log(ids.length >= 30, `manifest lists ${ids.length} clips`);
+
+let missing = [];
+Promise.all(ids.map((id) => fetch('../' + AUDIO.basePath + AUDIO.manifest[id].file, { method: 'HEAD' })
+  .then((r) => { if (!r.ok) missing.push(id); })
+  .catch(() => missing.push(id))))
+  .then(() => log(missing.length === 0, `all ${ids.length} files reachable${missing.length ? ' — missing: ' + missing.join(', ') : ''}`))
+  .then(() => log(true, 'harness complete — click Unlock to hear it'));
+
+const ui = {};
+for (const key of ['inside', 'speed', 'swarm', 'tod', 'gath']) {
+  ui[key] = document.getElementById(key);
+  ui[key].addEventListener('input', () => {
+    document.getElementById(key + 'V').textContent = ui[key].value;
+  });
+}
+const seasonSel = document.getElementById('season');
+
+let running = false;
+document.getElementById('unlock').onclick = async () => {
+  await audio.unlock();
+  await audio.ready;
+  const decoded = [...audio.library.buffers.entries()].filter(([, b]) => b).length;
+  log(decoded > 0, `${decoded} clips decoded, ${audio.library.failed.size} failed`);
+  if (running) return;
+  running = true;
+  let last = performance.now();
+  (function frame(now) {
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+    audio.update(dt, {
+      insideness: +ui.inside.value,
+      speed: +ui.speed.value,
+      swarmSize: +ui.swarm.value,
+      season: seasonSel.value,
+      timeOfDay: +ui.tod.value,
+      gathering: +ui.gath.value,
+    });
+    requestAnimationFrame(frame);
+  })(last);
+};
+document.getElementById('storm').onclick = () => audio.setWeather({ kind: 'storm', intensity: 1, wetness: 1 });
+document.getElementById('rain').onclick = () => audio.setWeather({ kind: 'rain', intensity: 0.7, wetness: 0.8 });
+document.getElementById('clear').onclick = () => audio.setWeather({ kind: 'clear', intensity: 0, wetness: 0 });
+document.getElementById('deposit').onclick = () => audio.play('deposit');
+document.getElementById('sting').onclick = () => audio.music('season', { force: true });
+document.getElementById('thunderNear').onclick = () => audio.thunder(40);
+document.getElementById('thunderFar').onclick = () => audio.thunder(420);
+setInterval(() => { document.getElementById('driven').textContent = 'weather.driven = ' + audio.weather.driven + '  kind = ' + audio.weather.kind; }, 500);
+window.audio = audio;
+</script>
+</body>
+</html>

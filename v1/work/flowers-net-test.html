@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hollowtree — shared flower reserves self test</title>
+<style>
+  html, body { background: #14100c; color: #f6e9cf; margin: 0; }
+  body { padding: 22px 26px; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h1 { font-size: 13px; letter-spacing: .18em; text-transform: uppercase; opacity: .6; margin: 0 0 14px; font-weight: 500; }
+  pre { white-space: pre-wrap; margin: 0; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<h1>Hollowtree · shared flower reserves · local driver</h1>
+<pre id="report">running…</pre>
+<script type="module">
+import * as THREE from 'three';
+import { createNet } from '../src/net/index.js';
+import { NET } from '../src/config.net.js';
+import { FLOWERS, FLOWER_SPECIES } from '../src/config.js';
+import { createFlowers } from '../src/entities/flowers.js';
+import { createGather } from '../src/systems/gather.js';
+import { createResources } from '../src/systems/resources.js';
+
+const out = document.getElementById('report');
+const lines = [];
+let passed = 0;
+let failed = 0;
+
+function log(text) { lines.push(text); out.textContent = lines.join('\n'); }
+const section = (title) => { log(''); log(`— ${title}`); };
+const now = () => performance.now();
+
+// A browser clamps setTimeout in a tab that is not in front — to 1 s when hidden, and to
+// once a minute after a few minutes hidden. Every local-driver round trip costs two
+// timers, so a backgrounded tab does not break these tests, it merely makes them slow.
+// The suite measures the clamp from its own sleeps and stretches every deadline by it,
+// and no assertion below compares against wall-clock time: expectations are derived from
+// the shared record's own server stamp. A throttled run is therefore slower, not redder.
+let throttle = 1;
+function sleep(ms) {
+  const t0 = now();
+  return new Promise((resolve) => setTimeout(() => {
+    const ratio = (now() - t0) / Math.max(1, ms);
+    if (ratio > throttle) throttle = Math.min(200, ratio);
+    resolve();
+  }, ms));
+}
+
+window.addEventListener('error', (e) => { failed++; log(`FAIL  uncaught — ${e.message}`); });
+window.addEventListener('unhandledrejection', (e) => {
+  failed++;
+  const r = e.reason;
+  log(`FAIL  unhandled rejection — ${r && r.stack ? r.stack : r}`);
+});
+
+// Each case gets its own recorder. A case that blows its deadline keeps running (a promise
+// cannot be cancelled), so its late results are labelled LATE and not counted — otherwise
+// they masquerade as results of the case that follows, which is exactly how the first
+// browser run read as four unrelated failures.
+// Stretching a deadline by the throttle factor is right, but it must still be bounded in
+// real time: at 126× a nominal 8 s wait becomes 17 minutes, which is indistinguishable
+// from a hang for anyone reading the page. Every wait is capped, so a stuck case reports
+// itself within a couple of minutes instead of sitting silent.
+const WAIT_CEILING_MS = 150000;
+const CASE_CEILING_MS = 360000;
+
+function recorder(name) {
+  const rec = { name, alive: true, finished: false, startedAt: now() };
+  // Breadcrumbs: if a case ever stalls again, the last line printed says exactly which
+  // step it was on and how long it had taken to get there.
+  rec.step = (label) => {
+    if (rec.alive) log(`INFO  ${name} · ${label} at +${((now() - rec.startedAt) / 1000).toFixed(1)} s`);
+  };
+  rec.check = (label, ok, detail) => {
+    const tail = detail ? `  (${detail})` : '';
+    if (!rec.alive) { log(`LATE  ${label}${tail}  [${name}, already timed out — not counted]`); return ok; }
+    if (ok) { passed++; log(`PASS  ${label}${tail}`); } else { failed++; log(`FAIL  ${label}${tail}`); }
+    return ok;
+  };
+  // scale=false for waits on things a throttled tab does not actually slow down (an asset
+  // fetch that may simply never arrive), so a missing file costs seconds, not minutes.
+  rec.until = async (predicate, ms, scale = true) => {
+    const deadline = now() + Math.min(ms * (scale ? throttle : 1), WAIT_CEILING_MS);
+    while (now() < deadline) {
+      if (predicate()) return true;
+      await sleep(20);
+    }
+    return false;
+  };
+  return rec;
+}
+
+function wipe(code) {
+  try { localStorage.removeItem(NET.local.storagePrefix + code.toUpperCase()); } catch (error) { /* ignore */ }
+}
+
+const makeNet = (code, mode, name) =>
+  createNet({ mode, code, driver: 'local', profile: { name, color: 'amber', pattern: 'banded' } });
+
+// A deterministic stand-in for the real terrain: the point of the id test is that the
+// flower generator is a pure function of (seed, terrain), and the real terrain is value
+// noise off TERRAIN.seed with no Math.random in it.
+const terrain = { getHeight: (x, z) => Math.sin(x * 0.05) * Math.cos(z * 0.05) * 2 };
+const DAISY = FLOWER_SPECIES[0];
+const SPEC = { max: DAISY.reserve, regrowth: DAISY.regrowth, regrowDelay: DAISY.regrowDelay };
+const ORIGIN = new THREE.Vector3(0, 1, 0);
+const makeField = () => createFlowers(new THREE.Scene(), terrain);
+
+// Frames, not seconds: once the entry has arrived the refresh is synchronous, so bursting
+// frames needs no timer and cannot be throttled.
+function frames(field, n) { for (let k = 0; k < n; k++) field.update(1 / 60, ORIGIN); }
+
+// The world clock — the same one reserves are stamped in. Never performance.now().
+const T = (n) => n.world.now();
+
+// Watches the raw shared records, so expectations come from { a, d } rather than from a
+// guess about how long the test itself took.
+function watch(n) {
+  const entries = new Map();
+  const stop = n.flowers.subscribe((id, e) => {
+    if (e) entries.set(id, { a: Number(e.a) || 0, d: Number(e.d) || 0 });
+    else entries.delete(id);
+  });
+  return { get: (id) => entries.get(id) || null, stop };
+}
+
+// The one formula the whole milestone rests on, written out here independently of the code
+// under test so the test cannot agree with a bug by sharing it.
+function derive(entry, spec, atMs) {
+  if (!entry || !entry.d) return spec.max;
+  const elapsed = (atMs - entry.d) / 1000 - spec.regrowDelay;
+  return Math.min(spec.max, entry.a + Math.max(0, elapsed) * spec.regrowth);
+}
+
+// Joining the hive is the one unbounded await in a case. Breadcrumbed so that if it ever
+// stalls, the last line on the page names the step rather than leaving a blank section.
+async function ready(t, ...nets) {
+  t.step(`waiting for ${nets.length} client${nets.length > 1 ? 's' : ''} to join the hive`);
+  for (const n of nets) await n.ready;
+  t.step('clients ready');
+}
+
+// ───────────────────────────────────────────────────────────── cases
+
+// The modules the game actually loads, constructed and stepped exactly as main.js steps
+// them. A module that parses but throws on its first frame fails here, loudly.
+async function caseSmoke(t) {
+  section('boot smoke — the real modules construct and survive frames');
+  let field = null;
+  try {
+    field = createFlowers(new THREE.Scene(), terrain);
+  } catch (error) {
+    t.check('createFlowers constructs', false, String(error && error.stack ? error.stack : error));
+    return;
+  }
+  t.check('createFlowers constructs', field.count === FLOWERS.count, `${field.count} flowers`);
+  try {
+    for (let k = 0; k < 5; k++) field.update(1 / 60, ORIGIN, k / 60);
+    t.check('flowers.update survives five frames', true, 'no throw');
+  } catch (error) {
+    t.check('flowers.update survives five frames', false, String(error && error.stack ? error.stack : error));
+  }
+  try {
+    const gather = createGather(field, createResources(), {
+      position: new THREE.Vector3(0, 1, 0), planarSpeed: 0, velocity: { x: 0, y: 0, z: 0 },
+    }, { entrance: new THREE.Vector3(0, 5000, 0), triggerRadius: 1 });
+    for (let k = 0; k < 5; k++) gather.update(1 / 60, { gather: true });
+    t.check('gather.update survives five frames', true, 'no throw');
+  } catch (error) {
+    t.check('gather.update survives five frames', false, String(error && error.stack ? error.stack : error));
+  }
+  field.dispose();
+}
+
+async function caseIds(t) {
+  section('stable ids — the generator is seed-deterministic');
+  const a = makeField();
+  const b = makeField();
+  let same = true;
+  let compared = 0;
+  for (let g = 0; g < a.flowers.length && same; g++) {
+    const ma = a.flowers[g].matrix;
+    const mb = b.flowers[g].matrix;
+    if (ma.length !== mb.length || a.flowers[g].count !== b.flowers[g].count) { same = false; break; }
+    for (let k = 0; k < ma.length; k++) {
+      compared++;
+      if (Math.abs(ma[k] - mb[k]) > 1e-9) { same = false; break; }
+    }
+  }
+  t.check('two independent fields place every instance identically', same,
+    `${compared} matrix floats over ${a.count} flowers`);
+  t.check('ids are index-keyed', a.idOf(0) === 'f0' && a.idOf(a.count - 1) === `f${a.count - 1}`,
+    `${a.idOf(0)} … ${a.idOf(a.count - 1)}`);
+  a.dispose();
+  b.dispose();
+}
+
+// Answers the transport question directly instead of leaving it to be inferred: a
+// BroadcastChannel does not deliver to the instance that posted, but it does deliver to
+// every OTHER instance — including a sibling in the same document. Each simulated client
+// builds its own channel, so two clients in one tab hear each other exactly as two tabs do.
+async function caseTransport(t) {
+  section('transport — two clients inside one document really do hear each other');
+
+  let heard = false;
+  if (typeof BroadcastChannel === 'function') {
+    const one = new BroadcastChannel('ht.flowers.probe');
+    const two = new BroadcastChannel('ht.flowers.probe');
+    two.onmessage = () => { heard = true; };
+    one.postMessage({ ping: 1 });
+    await t.until(() => heard, 4000);
+    one.close();
+    two.close();
+    t.check('a second BroadcastChannel in this document hears the first', heard,
+      heard ? 'same-document delivery works' : 'no delivery — two clients in one tab cannot see each other here');
+  } else {
+    t.check('BroadcastChannel is available', false, 'absent — the local driver would fall back to storage events');
+  }
+
+  const CODE = 'HTFLOWWIRE';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  const nb = makeNet(CODE, 'join', 'Ryszard');
+  await ready(t, na, nb);
+
+  let got = null;
+  const sent = now();
+  const stop = nb.flowers.subscribe((id, e) => { if (id === 'f7' && e && !got) got = { a: Number(e.a), at: now() }; });
+  const taken = await na.flowers.drain('f7', 2, SPEC);
+  const delivered = await t.until(() => got !== null, 10000);
+  t.check("a peer's drain reaches the other client's subscription",
+    delivered && Math.abs(got.a - (DAISY.reserve - taken)) < 1e-6,
+    got ? `a=${got.a.toFixed(3)} arrived ${(got.at - sent).toFixed(0)} ms after the drain was asked for`
+      : 'nothing ever arrived — a client that misses the write reads a flat 6.000 forever');
+
+  stop();
+  na.dispose(); nb.dispose();
+  await sleep(200);
+}
+
+async function caseShared(t) {
+  section('a drained flower reads the same on both clients');
+  const CODE = 'HTFLOWSHARE';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  const nb = makeNet(CODE, 'join', 'Ryszard');
+  await ready(t, na, nb);
+  const fa = makeField();
+  const fb = makeField();
+  fa.attachNet(na);
+  fb.attachNet(nb);
+  const w = watch(nb);
+
+  t.check('an untouched meadow reads full, not empty',
+    Math.abs(fa.reserveOf(0) - DAISY.reserve) < 1e-4 && Math.abs(fb.reserveOf(0) - DAISY.reserve) < 1e-4,
+    `f0 = ${fa.reserveOf(0).toFixed(3)} / ${fb.reserveOf(0).toFixed(3)} of ${DAISY.reserve}`);
+
+  let scoop = null;
+  fa.drain(0, 2.5, (s) => { scoop = s; });
+  const credited = await t.until(() => scoop !== null, 8000);
+  t.check('the transaction credits what it actually took', credited && Math.abs(scoop.taken - 2.5) < 1e-6,
+    scoop ? `took ${scoop.taken.toFixed(3)} of 2.5 asked` : 'callback never fired');
+
+  const arrived = await t.until(() => w.get('f0') !== null, 8000);
+  const entry = w.get('f0');
+  t.check('the shared record holds the reduced amount',
+    arrived && Math.abs(entry.a - (DAISY.reserve - 2.5)) < 1e-6,
+    entry ? `a=${entry.a.toFixed(3)} of ${DAISY.reserve}, stamped d=${entry.d}` : 'no record');
+
+  // Each value is read at its own instant, and a derived reserve is a function of time — so
+  // the tolerance is computed from the measured gap between the two reads rather than being
+  // a constant. Each field caches the world clock for up to 30 ms, which is why the gap gets
+  // that window added to it before being turned into units of regrowth.
+  const clockSlack = (gapSec) => (gapSec + 0.08) * SPEC.regrowth + 1e-3;
+
+  frames(fa, 12);
+  const tA = T(nb);
+  const vA = fa.reserveOf(0);
+  frames(fb, 12);
+  const tB = T(nb);
+  const vB = fb.reserveOf(0);
+
+  const wantA = derive(entry, SPEC, tA);
+  const wantB = derive(entry, SPEC, tB);
+  t.check('the draining client agrees with the record', Math.abs(vA - wantA) <= clockSlack(0.05),
+    `${vA.toFixed(3)} vs ${wantA.toFixed(3)}`);
+  t.check('the other client agrees with the record', Math.abs(vB - wantB) <= clockSlack(0.05),
+    `${vB.toFixed(3)} vs ${wantB.toFixed(3)}`);
+
+  const gap = Math.abs(tB - tA) / 1000;
+  const slack = clockSlack(gap);
+  t.check('both queens see the same flower', Math.abs(vA - vB) <= slack,
+    `${vA.toFixed(3)} / ${vB.toFixed(3)} — apart by ${Math.abs(vA - vB).toFixed(4)}, and ${gap.toFixed(2)} s`
+    + ` between the two reads permits ${slack.toFixed(4)} at ${SPEC.regrowth}/s`);
+
+  w.stop();
+  fa.dispose(); fb.dispose(); na.dispose(); nb.dispose();
+  await sleep(200);
+}
+
+// Between a drain committing and its echo arriving, the draining client holds a flower that
+// the shared record does not yet describe. Read naively that means "nobody has ever drained
+// this one" — which is full — so the bloom the queen just stripped springs back to full for a
+// round trip and then wilts again. It is invisible on a fast connection and glaring on a slow
+// one, which is exactly the class of bug a throttled pane is good at exposing.
+// The local driver emits inside its transaction, so its echo always beats the promise and
+// this branch never runs on it — a version of this case built on the local driver passed
+// against the broken code, which is worth remembering: a guard that cannot fail is not a
+// guard. This one supplies a net whose drain resolves before the subscription fires, which
+// any transport with a slower confirm path can do, and pins the branch directly.
+function lateEchoNet() {
+  const store = new Map();
+  let cb = null;
+  const grow = (e, spec) => {
+    if (!e || !e.d) return spec.max;
+    const el = (Date.now() - e.d) / 1000 - spec.regrowDelay;
+    return Math.min(spec.max, e.a + Math.max(0, el) * spec.regrowth);
+  };
+  return {
+    world: { now: () => Date.now() },
+    flowers: {
+      amount: (id, spec) => (store.has(id) ? grow(store.get(id), spec) : spec.max),
+      async drain(id, want, spec) {
+        const have = store.has(id) ? grow(store.get(id), spec) : spec.max;
+        const taken = Math.min(have, want);
+        store.set(id, { a: have - taken, d: Date.now() });
+        return taken; // resolves with no echo yet
+      },
+      subscribe(fn) { cb = fn; return () => { cb = null; }; },
+    },
+    flushEcho() { for (const [id, e] of store) if (cb) cb(id, { ...e }); },
+  };
+}
+
+async function caseNoSpringback(t) {
+  section('a drained bloom never springs back while its echo is in flight');
+  const field = makeField();
+  const net = lateEchoNet();
+  field.attachNet(net);
+
+  let credited = null;
+  field.drain(0, 3, (s) => { credited = s; });
+  const paid = await t.until(() => credited !== null, 4000, false);
+  t.check('the drain is credited before any echo arrives', paid && Math.abs(credited.taken - 3) < 1e-9,
+    credited ? `took ${credited.taken.toFixed(3)}` : 'no callback');
+
+  // Frames in the window where the shared record does not yet describe this flower. Read
+  // naively that means "never drained", which means full.
+  let peak = 0;
+  for (let k = 0; k < 30; k++) {
+    field.update(1 / 60, ORIGIN);
+    peak = Math.max(peak, field.reserveOf(0));
+  }
+  t.check('the bloom stays drained through the echo window', peak < DAISY.reserve - 0.5,
+    `highest of 30 frames was ${peak.toFixed(3)} — a springback reads ${DAISY.reserve.toFixed(3)}, the stripped value is ${(DAISY.reserve - 3).toFixed(3)}`);
+
+  net.flushEcho();
+  field.update(1 / 60, ORIGIN);
+  t.check('and the echo confirms the same value it was already showing',
+    Math.abs(field.reserveOf(0) - (DAISY.reserve - 3)) < 0.05,
+    `${field.reserveOf(0).toFixed(3)} vs ${(DAISY.reserve - 3).toFixed(3)}`);
+
+  field.dispose();
+}
+
+async function caseContention(t) {
+  section('queens racing for one bloom — the lost-update test');
+  const CODE = 'HTFLOWRACE';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  const nb = makeNet(CODE, 'join', 'Ryszard');
+  const nc = makeNet(CODE, 'join', 'Mama');
+  await ready(t, na, nb, nc);
+  const w = watch(na);
+
+  // A spec with regrowth switched off. This is the assertion that matters, and freezing
+  // regrowth is what makes it decisive: a slow round trip cannot refill the flower, so any
+  // sum over the reserve is a genuine lost update with no timing story to explain it away.
+  // (An earlier version of this case used the live spec and read a stale record to decide
+  // whether regrowth was possible — it accused the transaction of a bug that was really a
+  // throttled retry against a legitimately regrown flower.)
+  const FROZEN = { max: DAISY.reserve, regrowth: 0, regrowDelay: 0 };
+  const takes = await Promise.all([
+    na.flowers.drain('f1', 5, FROZEN),
+    nb.flowers.drain('f1', 5, FROZEN),
+    nc.flowers.drain('f1', 5, FROZEN),
+  ]);
+  const sum = takes.reduce((a, b) => a + b, 0);
+  t.check('three queens on one frozen bloom split exactly what it held, no more',
+    Math.abs(sum - DAISY.reserve) < 1e-6,
+    `${takes.map((v) => v.toFixed(3)).join(' + ')} = ${sum.toFixed(3)} of ${DAISY.reserve} (15 asked, regrowth off)`);
+  t.check('no queen was handed more than the flower ever had',
+    takes.every((v) => v >= 0 && v <= DAISY.reserve + 1e-6), takes.map((v) => v.toFixed(3)).join(' / '));
+
+  const emptied = await t.until(() => { const e = w.get('f1'); return e !== null && Math.abs(e.a) < 1e-6; }, 10000);
+  t.check('the record is emptied, never negative', emptied,
+    w.get('f1') ? `a=${w.get('f1').a.toFixed(3)} of ${DAISY.reserve}` : 'no record');
+
+  // The same race with regrowth live, bounded by what the flower could possibly have grown
+  // during the race. In a healthy tab that window is milliseconds and the bound is the bare
+  // reserve; in a throttled one it widens honestly instead of failing.
+  const t0 = T(na);
+  const [ra, rb] = await Promise.all([
+    na.flowers.drain('f5', 5, SPEC),
+    nb.flowers.drain('f5', 5, SPEC),
+  ]);
+  const span = Math.max(0, (T(na) - t0) / 1000);
+  const ceiling = DAISY.reserve + SPEC.regrowth * span;
+  t.check('with regrowth live, the takes stay inside what the flower could grow meanwhile',
+    ra + rb <= ceiling + 1e-6,
+    `${ra.toFixed(3)} + ${rb.toFixed(3)} = ${(ra + rb).toFixed(3)} of at most ${ceiling.toFixed(3)}`
+    + ` (${DAISY.reserve} reserve + ${SPEC.regrowth}/s over a ${span.toFixed(1)} s race${span > 1 ? ', throttled tab' : ''})`);
+
+  w.stop();
+  na.dispose(); nb.dispose(); nc.dispose();
+  await sleep(200);
+}
+
+async function caseRegrowth(t) {
+  section('a flower left alone regrows exactly per regrowth / regrowDelay');
+  const CODE = 'HTFLOWGROW';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  const nb = makeNet(CODE, 'join', 'Ryszard');
+  await ready(t, na, nb);
+  const fb = makeField();
+  fb.attachNet(nb);
+  const w = watch(nb);
+
+  // A deliberately slow curve. On the daisy's own numbers a drained flower refills in 24 s,
+  // so in a throttled pane both samples land after it has already hit the 6.0 ceiling and
+  // the growth assertion has nothing left to observe (6.000 → 6.000). At 0.02/s the same
+  // 4.0 units take 200 s to grow back, which no throttling can outrun, and the 20 s delay
+  // guarantees the first sample lands inside the no-growth window rather than hoping it does.
+  // The record itself is spec-free — { a, d } — so the field below still reads it on the
+  // real species curve.
+  const SLOW = { max: DAISY.reserve, regrowth: 0.02, regrowDelay: 20 };
+  const fillSeconds = (SLOW.max - (DAISY.reserve - 4)) / SLOW.regrowth;
+
+  const taken = await na.flowers.drain('f2', 4, SLOW);
+  const arrived = await t.until(() => w.get('f2') !== null, 8000);
+  const entry = w.get('f2');
+  t.check('the drain is recorded with a server stamp',
+    arrived && Math.abs(entry.a - (DAISY.reserve - taken)) < 1e-6 && entry.d > 0,
+    entry ? `a=${entry.a.toFixed(3)} d=${entry.d}` : 'no record');
+  t.step(`record arrived, ceiling is ${fillSeconds.toFixed(0)} s of growth away`);
+
+  const t1 = T(nb);
+  const age1 = (t1 - entry.d) / 1000;
+  const v1 = nb.flowers.amount('f2', SLOW);
+  t.check('nothing regrows inside regrowDelay',
+    age1 < SLOW.regrowDelay
+      ? Math.abs(v1 - entry.a) < 1e-9
+      : Math.abs(v1 - derive(entry, SLOW, t1)) < 0.02,
+    age1 < SLOW.regrowDelay
+      ? `${v1.toFixed(3)} still exactly the stored ${entry.a.toFixed(3)} at t+${age1.toFixed(2)} s of ${SLOW.regrowDelay} s`
+      : `sample landed at t+${age1.toFixed(2)} s, past the ${SLOW.regrowDelay} s delay — falling back to the curve`);
+
+  // Wait in server time until the curve is provably past the delay, rather than sleeping a
+  // wall-clock guess that throttling stretches into the wrong part of the curve.
+  const grown = await t.until(() => (T(nb) - entry.d) / 1000 > SLOW.regrowDelay + 4, 45000);
+  const t2 = T(nb);
+  const age2 = (t2 - entry.d) / 1000;
+  const v2 = nb.flowers.amount('f2', SLOW);
+  const want = derive(entry, SLOW, t2);
+  t.check('regrowth matches the rate exactly, with no client ticking it',
+    grown && Math.abs(v2 - want) < 0.02,
+    `${v2.toFixed(3)} vs ${want.toFixed(3)} at t+${age2.toFixed(2)} s (+${SLOW.regrowth}/s past ${SLOW.regrowDelay} s)`);
+  t.check('the flower really did grow, and had not saturated when measured',
+    v2 > entry.a + 1e-9 && v2 < SLOW.max - 1e-9,
+    `${entry.a.toFixed(3)} → ${v2.toFixed(3)}, still ${((SLOW.max - v2) / SLOW.regrowth).toFixed(0)} s short of the ${SLOW.max} ceiling`);
+
+  // And the field, reading the very same record on the real species curve, agrees with it —
+  // saturated or not, both sides of this comparison saturate identically.
+  frames(fb, 4);
+  const t3 = T(nb);
+  const v3 = fb.reserveOf(2);
+  const want3 = derive(entry, SPEC, t3);
+  t.check('the meadow agrees with the record on the real species curve', Math.abs(v3 - want3) < 0.05,
+    `${v3.toFixed(3)} vs ${want3.toFixed(3)} at t+${((t3 - entry.d) / 1000).toFixed(2)} s`
+    + ` (+${DAISY.regrowth}/s past ${DAISY.regrowDelay} s${v3 >= DAISY.reserve - 1e-4 ? ', saturated' : ''})`);
+
+  w.stop();
+  fb.dispose(); na.dispose(); nb.dispose();
+  await sleep(200);
+}
+
+async function caseUntouchedFull(t) {
+  section('a never-drained flower reads full');
+  const CODE = 'HTFLOWFULL';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  await ready(t, na);
+  const fa = makeField();
+  fa.attachNet(na);
+  frames(fa, 20);
+  // Full means "equal to some species' maximum" — reading a fresh meadow as empty was a
+  // real bug, and reading it as merely non-zero would not have caught it.
+  const maxima = FLOWER_SPECIES.map((s) => s.reserve);
+  let notFull = 0;
+  for (let i = 0; i < fa.count; i++) {
+    const v = fa.reserveOf(i);
+    if (!maxima.some((m) => Math.abs(v - m) < 1e-4)) notFull++;
+  }
+  t.check('every flower in a fresh meadow reads at its species maximum', notFull === 0,
+    `${fa.count - notFull} full, ${notFull} short of ${fa.count}, maxima ${maxima.join('/')}`);
+  t.check('net reports max for an id that was never written',
+    na.flowers.amount('f999', SPEC) === DAISY.reserve, `${na.flowers.amount('f999', SPEC)} of ${DAISY.reserve}`);
+  t.check('nothing is tracked as depleted in a fresh meadow', fa.trackedCount() === 0, `${fa.trackedCount()} tracked`);
+  fa.dispose(); na.dispose();
+  await sleep(200);
+}
+
+async function caseRemoteVisible(t) {
+  section('a remote drain repaints the instance, without a rebuild');
+  const CODE = 'HTFLOWSEEN';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  const nb = makeNet(CODE, 'join', 'Ryszard');
+  await ready(t, na, nb);
+  const fa = makeField();
+  fa.attachNet(na);
+  const group = fa.flowers[0];
+
+  // The authored GLB swaps the placeholder geometry in when it finishes loading, which is a
+  // legitimate one-time replacement and nothing to do with drains — so wait for the models
+  // to settle before taking the baseline, or the test blames a drain for the loader. This
+  // waits on the loader's own promise rather than polling a flag: a hidden tab throttles
+  // timers, not fetches, so polling for this could outlast any sane deadline (it did — it
+  // is what stalled this case in a backgrounded pane). The race is belt-and-braces for a
+  // fetch that never settles at all.
+  const settled = await Promise.race([
+    fa.modelsReady.then(() => true, () => false),
+    new Promise((r) => setTimeout(() => r(false), 30000)),
+  ]);
+  const authored = settled && fa.flowers.every((g) => g.authored);
+  t.step(`models ${settled ? (authored ? 'loaded' : 'settled on placeholders') : 'still loading — baseline taken anyway'}`);
+
+  const geometryBefore = group.mesh.geometry;
+  const colorBefore = group.color.slice();
+
+  const taken = await nb.flowers.drain('f3', DAISY.reserve, SPEC);
+  t.step(`peer drained ${taken.toFixed(3)}, waiting for the echo`);
+  const seen = await t.until(() => { fa.update(1 / 60, ORIGIN); return fa.reserveOf(3) < DAISY.reserve * 0.5; }, 8000);
+  t.check('the remote drain reaches this client', seen, `f3 = ${fa.reserveOf(3).toFixed(3)}`);
+
+  let changed = 0;
+  for (let k = 0; k < group.color.length; k += 3) {
+    if (Math.abs(group.color[k] - colorBefore[k]) > 1e-4
+      || Math.abs(group.color[k + 1] - colorBefore[k + 1]) > 1e-4
+      || Math.abs(group.color[k + 2] - colorBefore[k + 2]) > 1e-4) changed++;
+  }
+  t.check('exactly one instance was repainted', changed === 1, `${changed} of ${group.count} instances`);
+  const sameGeometry = group.mesh.geometry === geometryBefore;
+  const sameBuffer = group.mesh.instanceColor.array === group.color;
+  t.check('no geometry or buffer rebuild', sameGeometry && sameBuffer,
+    `geometry ${sameGeometry ? 'unchanged' : 'REPLACED'}, instanceColor buffer ${sameBuffer ? 'unchanged' : 'REALLOCATED'}`
+    + ` (authored models ${authored ? 'loaded before the baseline' : 'never loaded — placeholder geometry'})`);
+
+  fa.dispose(); nb.dispose(); na.dispose();
+  await sleep(200);
+}
+
+async function caseSolo(t) {
+  section('solo without a net handle still gathers and depletes');
+  const field = makeField();
+  t.check('no net attached', field.netAttached === false, `netAttached=${field.netAttached}`);
+
+  const probe = field.sampleNearest(new THREE.Vector3(0, 0, 0), 200);
+  const idx = probe ? probe.index : -1;
+  const at = probe ? probe.position.clone() : new THREE.Vector3();
+  const before = idx >= 0 ? field.reserveOf(idx) : 0;
+  const scoop = field.drain(idx, 1.0);
+  t.check('drain returns synchronously offline, exactly as before',
+    Boolean(scoop) && scoop.taken > 0 && field.reserveOf(idx) < before,
+    scoop ? `took ${scoop.taken.toFixed(3)}, ${before.toFixed(3)} → ${field.reserveOf(idx).toFixed(3)}` : 'null');
+
+  // dt no longer drives regrowth: ten simulated seconds inside regrowDelay must add nothing.
+  const held = field.reserveOf(idx);
+  const t0 = Date.now();
+  for (let k = 0; k < 10; k++) field.update(1.0, ORIGIN);
+  t.check('regrowth is derived, not accumulated from dt', Math.abs(field.reserveOf(idx) - held) < 1e-4,
+    `${held.toFixed(4)} → ${field.reserveOf(idx).toFixed(4)} after 10 s of dt in ${Date.now() - t0} ms of wall clock`);
+
+  const resources = createResources();
+  const flight = { position: at, planarSpeed: 0, velocity: { x: 0, y: 0, z: 0 } };
+  const hive = { entrance: new THREE.Vector3(0, 5000, 0), triggerRadius: 1 };
+  const gather = createGather(field, resources, flight, hive);
+  const startReserve = field.reserveOf(idx);
+  for (let k = 0; k < 120; k++) gather.update(1 / 60, { gather: true });
+  t.check('the queen fills her baskets offline', gather.state.load > 0.1,
+    `load ${gather.state.load.toFixed(3)} after 2 s of holding`);
+  t.check('the flower she held is measurably lighter', field.reserveOf(idx) < startReserve - 0.1,
+    `${startReserve.toFixed(3)} → ${field.reserveOf(idx).toFixed(3)}`);
+  field.dispose();
+}
+
+// The refresh is amortised over frames with a cursor walking a swap-remove list. Get that
+// bookkeeping wrong and some flower is never revisited: it stays tracked and stays visibly
+// wilted for the rest of the session. Regrowth is derived from the clock, so this winds the
+// clock forward rather than waiting — the whole fast-forward is synchronous, so nothing
+// else can observe the patched clock.
+async function caseNoStranding(t) {
+  section('amortised refresh — no flower is left behind');
+  const field = makeField();
+  const born = field.trackedCount();
+  t.check('a fresh meadow starts with every flower part-drained and tracked', born === field.count,
+    `${born} of ${field.count} tracked at birth`);
+
+  const realNow = Date.now;
+  let skew = 0;
+  Date.now = () => realNow() + skew;
+  try {
+    for (let sec = 1; sec <= 60; sec++) {
+      skew = sec * 1000;
+      frames(field, 60);
+    }
+  } finally {
+    Date.now = realNow;
+  }
+
+  const maxima = FLOWER_SPECIES.map((s) => s.reserve);
+  let short = 0;
+  for (let i = 0; i < field.count; i++) {
+    const v = field.reserveOf(i);
+    if (!maxima.some((m) => Math.abs(v - m) < 1e-4)) short++;
+  }
+  t.check('after a minute every flower was revisited, refilled and untracked',
+    field.trackedCount() === 0 && short === 0,
+    `${field.trackedCount()} still tracked, ${short} short of full, of ${field.count}`);
+  field.dispose();
+}
+
+async function caseGatherOnline(t) {
+  section('gathering online credits only what the transaction granted');
+  const CODE = 'HTFLOWGATH';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  await ready(t, na);
+  const field = makeField();
+  field.attachNet(na);
+
+  // sampleNearest reuses one handle object, so anything needed later is copied out now.
+  const probe = field.sampleNearest(new THREE.Vector3(0, 0, 0), 200);
+  const idx = probe.index;
+  const idxMax = probe.reserveMax;
+  const flight = { position: probe.position.clone(), planarSpeed: 0, velocity: { x: 0, y: 0, z: 0 } };
+  const gather = createGather(field, createResources(), flight,
+    { entrance: new THREE.Vector3(0, 5000, 0), triggerRadius: 1 });
+
+  await t.until(() => {
+    gather.update(1 / 60, { gather: true });
+    field.update(1 / 60, flight.position);
+    return gather.state.load > 0.5;
+  }, 8000);
+  t.check('baskets fill from the shared reserve', gather.state.load > 0.1, `load ${gather.state.load.toFixed(3)}`);
+  t.check('the shared flower dropped by roughly what was credited', field.reserveOf(idx) < idxMax - 0.1,
+    `${idxMax.toFixed(2)} → ${field.reserveOf(idx).toFixed(3)}`);
+
+  const stats = na.stats();
+  t.check('gathering did not flood the transport', !stats || stats.messagesSent < 400,
+    stats ? `${stats.messagesSent} messages for ${gather.state.load.toFixed(2)} of load` : 'no stats');
+
+  field.dispose(); na.dispose();
+  await sleep(200);
+}
+
+// A warmup pass (JIT, first touch of the typed arrays) and then five timed passes, judged
+// on the fastest: by this point in the suite a dozen fields have been built and thrown
+// away, so a single timing measures the garbage collector as much as the code. The median
+// is printed alongside so a genuinely slow result cannot hide behind one lucky pass.
+function costOf(field) {
+  for (let k = 0; k < 120; k++) field.update(1 / 60, ORIGIN);
+  const runs = [];
+  for (let r = 0; r < 5; r++) {
+    const mark = now();
+    for (let k = 0; k < 240; k++) field.update(1 / 60, ORIGIN);
+    runs.push((now() - mark) / 240);
+  }
+  runs.sort((a, b) => a - b);
+  return { best: runs[0], median: runs[2] };
+}
+
+async function caseCost(t) {
+  section('per-frame cost of the new read path');
+  // Every flower depleted at once — a state real play never reaches, and the ceiling the
+  // 40 fps target (25 ms of frame budget) has to survive.
+  const solo = makeField();
+  const soloCost = costOf(solo);
+  t.check('offline update stays cheap with every flower tracked', soloCost.best < 1.2,
+    `${soloCost.best.toFixed(3)} ms/frame best, ${soloCost.median.toFixed(3)} median — ${solo.trackedCount()} of ${solo.count} tracked, ${(soloCost.best / 25 * 100).toFixed(1)}% of a 40 fps frame`);
+  solo.dispose();
+
+  const CODE = 'HTFLOWCOST';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  await ready(t, na);
+  const field = makeField();
+  field.attachNet(na);
+  const jobs = [];
+  for (let i = 0; i < 60; i++) jobs.push(na.flowers.drain(`f${i}`, 3, SPEC));
+  await Promise.all(jobs);
+  const tracked = await t.until(() => { field.update(1 / 60, ORIGIN); return field.trackedCount() >= 60; }, 12000);
+
+  const netCost = costOf(field);
+  t.check('net-backed update stays cheap', tracked && netCost.best < 1.2,
+    `${netCost.best.toFixed(3)} ms/frame best, ${netCost.median.toFixed(3)} median — ${field.trackedCount()} depleted of ${field.count}, ${(netCost.best / 25 * 100).toFixed(1)}% of a 40 fps frame`);
+
+  field.dispose(); na.dispose();
+  await sleep(200);
+}
+
+const cases = [
+  { name: 'boot smoke', fn: caseSmoke, budget: 20000 },
+  { name: 'stable ids', fn: caseIds, budget: 20000 },
+  { name: 'transport', fn: caseTransport, budget: 30000 },
+  { name: 'shared depletion', fn: caseShared, budget: 30000 },
+  { name: 'no springback', fn: caseNoSpringback, budget: 30000 },
+  { name: 'contention', fn: caseContention, budget: 30000 },
+  { name: 'regrowth', fn: caseRegrowth, budget: 40000 },
+  { name: 'untouched reads full', fn: caseUntouchedFull, budget: 30000 },
+  { name: 'remote drain visible', fn: caseRemoteVisible, budget: 30000 },
+  { name: 'solo without net', fn: caseSolo, budget: 30000 },
+  { name: 'no stranding', fn: caseNoStranding, budget: 30000 },
+  { name: 'gathering online', fn: caseGatherOnline, budget: 30000 },
+  { name: 'per-frame cost', fn: caseCost, budget: 45000 },
+];
+
+// No case may stall the page. The deadline is re-evaluated against the measured throttle
+// factor as the case runs, so a tab that gets backgrounded midway is given proportionally
+// more time instead of being failed for the browser's decision.
+async function runCase(entry) {
+  const rec = recorder(entry.name);
+  const guard = new Promise((resolve) => {
+    const start = now();
+    const tick = () => {
+      if (rec.finished) return resolve('__done__');
+      if (now() - start > Math.min(entry.budget * throttle, CASE_CEILING_MS)) return resolve('__timeout__');
+      return setTimeout(tick, 250);
+    };
+    setTimeout(tick, 250);
+  });
+  try {
+    const result = await Promise.race([entry.fn(rec).then(() => { rec.finished = true; return '__done__'; }), guard]);
+    if (result === '__timeout__') {
+      const spent = ((now() - rec.startedAt) / 1000).toFixed(0);
+      rec.alive = false;
+      failed++;
+      log(`FAIL  ${entry.name} timed out after ${spent} s at ~${throttle.toFixed(0)}× throttle — the INFO line above it is the last step it completed. Anything it prints from here on is labelled LATE`);
+    }
+  } catch (error) {
+    rec.finished = true;
+    failed++;
+    log(`FAIL  ${entry.name} threw — ${error && error.stack ? error.stack : error}`);
+  }
+}
+
+(async () => {
+  const started = now();
+  // Revision stamp: if this line is missing or older than the one in the report you were
+  // sent, the browser served a cached copy of this page — hard-reload before reading it.
+  log('INFO  page revision r11 · timing-proof, bounded waits, breadcrumbs · 13 cases');
+  log(`INFO  ${FLOWERS.count} flowers · local driver · ${NET.local.latencyMs}±${NET.local.latencyJitterMs} ms simulated latency`);
+  const probe = now();
+  for (let k = 0; k < 3; k++) await sleep(25);
+  const perTimer = (now() - probe) / 3;
+  log(`INFO  tab is ${document.visibilityState}; a 25 ms timer took ${perTimer.toFixed(0)} ms`
+    + (throttle > 1.5
+      ? ` — this tab is throttled ~${throttle.toFixed(0)}× by the browser, so every deadline below is stretched to match. Results stay valid, the run just takes longer.`
+      : ' — no throttling, timers are honest'));
+  for (const entry of cases) await runCase(entry);
+  log('');
+  log(`${passed} passed, ${failed} failed in ${((now() - started) / 1000).toFixed(1)} s`
+    + (throttle > 1.5 ? ` (throttle factor reached ${throttle.toFixed(0)}×)` : ''));
+  log(failed ? 'RESULT FAIL' : 'RESULT PASS');
+  window.__flowerTest = { passed, failed, throttle, report: lines.join('\n') };
+})();
+</script>
+</body>
+</html>

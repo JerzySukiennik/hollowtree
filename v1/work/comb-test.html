@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hollowtree — comb self test</title>
+<style>
+  html, body { background: #14100c; color: #f6e9cf; margin: 0; }
+  body { padding: 22px 26px; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h1 { font-size: 13px; letter-spacing: .18em; text-transform: uppercase; opacity: .6; margin: 0 0 14px; font-weight: 500; }
+  pre { white-space: pre-wrap; margin: 0; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<h1>Hollowtree · comb, stores and build mode · local driver</h1>
+<pre id="report">running…</pre>
+<script type="module">
+import * as THREE from 'three';
+import { COMB } from '../src/config.js';
+import { NET } from '../src/config.net.js';
+import { CELL_BY_ID, COMB_TUNING, costOf, refundOf } from '../src/config.comb.js';
+import { createHexGrid } from '../src/nest/hexgrid.js';
+import { createComb } from '../src/nest/comb.js';
+import { createBuildMode } from '../src/nest/build-mode.js';
+import { createResources } from '../src/systems/resources.js';
+import { createNet } from '../src/net/index.js';
+
+const out = document.getElementById('report');
+const lines = [];
+let passed = 0;
+let failed = 0;
+
+function log(text) { lines.push(text); out.textContent = lines.join('\n'); }
+const section = (t) => { log(''); log(`— ${t}`); };
+const nowMs = () => performance.now();
+
+function pass(name, detail) { passed++; log(`PASS  ${name}${detail ? `  ${detail}` : ''}`); }
+function fail(name, detail) { failed++; log(`FAIL  ${name}${detail ? `  ${detail}` : ''}`); }
+function check(ok, name, detail) { if (ok) pass(name, detail); else fail(name, detail); }
+
+window.addEventListener('error', (e) => { failed++; log(`FAIL  uncaught — ${e.message}`); });
+window.addEventListener('unhandledrejection', (e) => {
+  failed++;
+  const r = e.reason;
+  log(`FAIL  unhandled rejection — ${r && r.stack ? r.stack : r}`);
+});
+
+// Every case runs against a deadline. A case that blows it prints FAIL and the suite
+// carries on — nothing here can hang the page.
+const CASE_MS = 45000;
+function withDeadline(name, fn, ms) {
+  let timer = null;
+  const limit = ms || CASE_MS;
+  return Promise.race([
+    Promise.resolve().then(fn),
+    new Promise((resolve) => {
+      timer = setTimeout(() => { fail(`${name} — deadline`, `${limit} ms elapsed with no result`); resolve(); }, limit);
+    }),
+  ]).catch((error) => {
+    fail(`${name} — threw`, error && error.stack ? error.stack.split('\n')[0] : String(error));
+  }).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------- fixtures
+
+// A hall the same shape as the real one, with an aperture on wall 0, so route rules,
+// wrapping and the entrance exclusion are all exercised.
+const VOLUME = {
+  minX: -48, maxX: 48, minZ: -32, maxZ: 32,
+  floorY: 0, ceilY: 40,
+  entranceWall: 0, entranceS: 48, entranceY: 16, entranceRadius: 3.2,
+};
+const ENTRANCE = { s: VOLUME.entranceS, y: VOLUME.entranceY };
+const RICH = { pollen: 1e6, nectar: 1e6, resin: 1e6, honey: 0 };
+
+const makeGrid = () => createHexGrid({ ...VOLUME });
+
+function makeComb(extra) {
+  const grid = makeGrid();
+  const resources = createResources();
+  const comb = createComb({
+    grid, resources, entrance: ENTRANCE, scene: null, ...(extra || {}),
+  });
+  return { grid, resources, comb };
+}
+
+function fund(resources, comb, amounts) {
+  for (const kind of ['pollen', 'nectar', 'resin']) {
+    resources.setCapacity(kind, Math.max(resources.capacity[kind], amounts[kind] * 2 + 10));
+    const have = resources[kind];
+    if (amounts[kind] > have) resources.add(kind, amounts[kind] - have);
+  }
+}
+
+// Simulated seconds, fed as frames. No wall-clock waiting, no timers.
+function run(comb, seconds, step) {
+  const dt = step || 1 / 30;
+  let t = 0;
+  while (t < seconds - 1e-9) { comb.update(dt); t += dt; }
+  return t;
+}
+
+// A free spot in the middle of the lattice, far from the aperture.
+function freeSpot(grid, colOffset) {
+  const row = Math.floor(grid.rows * 0.5);
+  const col = grid.wrapCol(Math.floor(grid.columns * 0.5) + (colOffset || 0));
+  return { col, row, layer: 0 };
+}
+
+const KEY_OF = (grid, c) => grid.key(c.col, c.row, c.layer);
+
+// ---------------------------------------------------------------- 1 · lattice
+
+await withDeadline('hexgrid', async () => {
+  section('lattice');
+  const grid = makeGrid();
+  const fails = grid.selfTest();
+  check(fails.length === 0, 'hexgrid.selfTest() reports nothing',
+    `${fails.length} complaint(s)${fails.length ? ` — ${fails.slice(0, 3).join(' | ')}` : ''}, ${grid.columns} cols × ${grid.rows + 1} rows × ${grid.layers} layers`);
+});
+
+// ---------------------------------------------------------------- 2 · touch rule
+
+await withDeadline('touch rule', async () => {
+  section('touch rule');
+  const { grid, resources, comb } = makeComb({ baseCapacity: RICH });
+  fund(resources, comb, { pollen: 500, nectar: 500, resin: 500 });
+
+  const first = freeSpot(grid);
+  const seeded = await comb.place(first.col, first.row, first.layer, 'pollen');
+  check(seeded.ok, 'first cell needs no neighbour', `placed ${KEY_OF(grid, first)}`);
+
+  const near = grid.neighbors(first.col, first.row, first.layer)[0];
+  const adjacent = await comb.place(near.col, near.row, near.layer, 'pollen');
+  check(adjacent.ok, 'a neighbouring cell is accepted', `${KEY_OF(grid, near)} touches ${KEY_OF(grid, first)}`);
+
+  const island = freeSpot(grid, 12);
+  const isolated = await comb.place(island.col, island.row, island.layer, 'pollen');
+  check(!isolated.ok && isolated.reason === 'detached',
+    'an island is rejected', `reason "${isolated.reason}" at ${KEY_OF(grid, island)}`);
+  check(comb.cells.size === 2, 'exactly the two touching cells exist', `${comb.cells.size} cells`);
+
+  // Inward layers: layer 1 needs the cell behind it, exactly as the ghost assumes.
+  const inward = await comb.place(first.col, first.row, 1, 'pollen');
+  check(inward.ok, 'a cell may grow inward onto an existing one', `layer 1 at ${first.col},${first.row}`);
+  comb.dispose();
+});
+
+// ---------------------------------------------------------------- 3 · adjacency effects
+
+await withDeadline('adjacency', async () => {
+  section('adjacency');
+  const { grid, resources, comb } = makeComb({ baseCapacity: RICH });
+  fund(resources, comb, { pollen: 900, nectar: 900, resin: 900 });
+  const broodType = CELL_BY_ID.get('brood');
+  const build = (c, id) => comb.place(c.col, c.row, c.layer, id);
+
+  const centre = freeSpot(grid);
+  await build(centre, 'brood');
+  run(comb, broodType.buildTime + 1);
+  const alone = comb.effects.swarmCap;
+  check(Math.abs(alone - broodType.effects.swarmCap) < 1e-6,
+    'a lone brood cell gives its base swarm cap',
+    `${alone.toFixed(2)} vs base ${broodType.effects.swarmCap}`);
+
+  const ring = grid.neighbors(centre.col, centre.row, centre.layer).slice(0, 3);
+  for (const n of ring) await build(n, 'pollen');
+  run(comb, CELL_BY_ID.get('pollen').buildTime + 1);
+
+  const cell = comb.cellAt(centre.col, centre.row, centre.layer);
+  const expectedBonus = Math.min(broodType.bonus.max, broodType.bonus.per * ring.length);
+  const expectedCap = broodType.effects.swarmCap * (1 + expectedBonus)
+    + 0; // pollen stores add no swarm cap
+  check(Math.abs(cell.bonus.value - expectedBonus) < 1e-9,
+    'warmth counts finished neighbours',
+    `${ring.length} neighbours → +${(cell.bonus.value * 100).toFixed(0)}% (expected +${(expectedBonus * 100).toFixed(0)}%)`);
+  check(Math.abs(comb.effects.swarmCap - expectedCap) < 1e-6,
+    'the warmth bonus reaches the swarm cap',
+    `${comb.effects.swarmCap.toFixed(2)} vs ${expectedCap.toFixed(2)}`);
+  comb.dispose();
+});
+
+// ---------------------------------------------------------------- 4 · route gating
+
+await withDeadline('entrance route', async () => {
+  section('entrance route');
+  const { grid, resources, comb } = makeComb({ baseCapacity: RICH });
+  fund(resources, comb, { pollen: 900, nectar: 900, resin: 900 });
+
+  const guardType = CELL_BY_ID.get('guard');
+  const locked = comb.canPlace(0, 0, 0, 'guard');
+  check(locked.reason === 'locked', 'defensive cells stay locked without a wax workshop', `reason "${locked.reason}"`);
+
+  // Seed on the mouth, so route distances have somewhere to start.
+  const mouth = grid.parseKey(Array.from(comb.mouth)[0]);
+  await comb.place(mouth.col, mouth.row, mouth.layer, 'wax');
+  run(comb, CELL_BY_ID.get('wax').buildTime + 1);
+  check(comb.typeUnlocked('guard'), 'the workshop unlocks the guard post');
+
+  // A chain running away from the aperture along one row.
+  const chain = [];
+  let cursor = { col: mouth.col, row: mouth.row, layer: 0 };
+  for (let i = 0; i < 9; i++) {
+    cursor = { col: grid.wrapCol(cursor.col + 1), row: cursor.row, layer: 0 };
+    if (!grid.isValid(cursor.col, cursor.row, 0)) break;
+    const r = await comb.place(cursor.col, cursor.row, 0, 'pollen');
+    if (!r.ok) break;
+    chain.push({ ...cursor });
+  }
+  run(comb, CELL_BY_ID.get('pollen').buildTime + 1);
+
+  const nearSpot = chain[0];
+  const farSpot = chain[chain.length - 1];
+  const nearNeighbour = grid.neighbors(nearSpot.col, nearSpot.row, 0).find((n) => !grid.has(n.col, n.row, n.layer));
+  const farNeighbour = grid.neighbors(farSpot.col, farSpot.row, 0).find((n) => !grid.has(n.col, n.row, n.layer));
+  await comb.place(nearNeighbour.col, nearNeighbour.row, nearNeighbour.layer, 'guard');
+  await comb.place(farNeighbour.col, farNeighbour.row, farNeighbour.layer, 'guard');
+  run(comb, guardType.buildTime + 1);
+
+  const nearCell = comb.cellAt(nearNeighbour.col, nearNeighbour.row, nearNeighbour.layer);
+  const farCell = comb.cellAt(farNeighbour.col, farNeighbour.row, farNeighbour.layer);
+  check(nearCell.active && nearCell.routeDist <= guardType.gate.range,
+    'a guard post on the entrance route is live',
+    `route distance ${nearCell.routeDist} ≤ ${guardType.gate.range}`);
+  check(!farCell.active && farCell.routeDist > guardType.gate.range,
+    'a guard post off the route is inert',
+    `route distance ${farCell.routeDist} > ${guardType.gate.range}`);
+  const expectedSlots = guardType.effects.guardSlots * (1 + nearCell.bonus.value);
+  check(Math.abs(comb.effects.guardSlots - expectedSlots) < 1e-6,
+    'only the live guard post contributes its seats',
+    `${comb.effects.guardSlots.toFixed(2)} vs ${expectedSlots.toFixed(2)}`);
+  comb.dispose();
+});
+
+// ---------------------------------------------------------------- 5 · stores and capacity
+
+await withDeadline('stores', async () => {
+  section('stores and capacity');
+  const { grid, resources, comb } = makeComb();
+  // Deliberately NOT rich: this case is about the real economy.
+  const base = { ...COMB_TUNING.baseCapacity };
+  check(Math.abs(resources.capacity.pollen - base.pollen) < 1e-9,
+    'a bare hollow holds only its base capacity',
+    `${resources.capacity.pollen} vs base ${base.pollen}`);
+
+  resources.add('pollen', 10000);
+  check(Math.abs(resources.pollen - base.pollen) < 1e-6,
+    'a deposit cannot exceed capacity',
+    `stored ${resources.pollen.toFixed(1)} of a 10000 deposit`);
+
+  resources.add('resin', 10000);
+  const pollenType = CELL_BY_ID.get('pollen');
+  const first = freeSpot(grid);
+  await comb.place(first.col, first.row, 0, 'pollen');
+  run(comb, pollenType.buildTime + 1);
+  const oneStore = base.pollen + pollenType.effects.capacity.pollen;
+  check(Math.abs(comb.capacity.pollen - oneStore) < 1e-6,
+    'capacity is base plus the built store',
+    `${comb.capacity.pollen.toFixed(1)} vs ${oneStore.toFixed(1)}`);
+  check(Math.abs(resources.capacity.pollen - comb.capacity.pollen) < 1e-6,
+    'the bank is told about it', `${resources.capacity.pollen.toFixed(1)}`);
+
+  const second = grid.neighbors(first.col, first.row, 0).find((n) => !grid.has(n.col, n.row, n.layer));
+  await comb.place(second.col, second.row, second.layer, 'pollen');
+  run(comb, pollenType.buildTime + 1);
+  const paired = base.pollen + 2 * pollenType.effects.capacity.pollen * (1 + pollenType.bonus.per * 1);
+  check(Math.abs(comb.capacity.pollen - paired) < 1e-6,
+    'two packed stores each earn the packing bonus',
+    `${comb.capacity.pollen.toFixed(2)} vs ${paired.toFixed(2)}`);
+
+  resources.add('pollen', 10000);
+  check(Math.abs(resources.pollen - paired) < 1e-6,
+    'deposits fill exactly the capacity the comb provides',
+    `${resources.pollen.toFixed(2)} of ${paired.toFixed(2)}`);
+  comb.dispose();
+});
+
+// ---------------------------------------------------------------- 6 · ripening
+
+await withDeadline('ripening', async () => {
+  section('nectar → honey');
+  const { grid, resources, comb } = makeComb({ baseCapacity: { ...RICH, honey: 0 } });
+  fund(resources, comb, { pollen: 900, nectar: 900, resin: 900 });
+  const honeyType = CELL_BY_ID.get('honey');
+
+  const spot = freeSpot(grid);
+  await comb.place(spot.col, spot.row, 0, 'honey');
+  run(comb, honeyType.buildTime + 1);
+  check(comb.effects.convertRate > 0, 'a finished honey store ripens',
+    `${comb.effects.convertRate.toFixed(4)} honey/s`);
+
+  fund(resources, comb, { pollen: 0, nectar: 900, resin: 0 });
+  const before = {
+    honey: comb.stores.honey,
+    produced: comb.convert.produced,
+    processed: comb.convert.processedSec,
+    drained: comb.convert.drained,
+    nectar: resources.nectar,
+  };
+  const rate = comb.effects.convertRate;                 // read now, not assumed
+  const perHoney = comb.effects.convertDrain / rate;
+  const fed = run(comb, 30);
+  const processed = comb.convert.processedSec - before.processed;
+  const made = comb.convert.produced - before.produced;
+  const expected = rate * processed;
+
+  check(processed > 0 && Math.abs(processed - (fed - comb.convert.accumulator)) < 1e-6,
+    'every fed second is either ripened or still in the accumulator',
+    `fed ${fed.toFixed(3)} s → ripened ${processed.toFixed(3)} s + pending ${comb.convert.accumulator.toFixed(3)} s`);
+  check(Math.abs(made - expected) < 1e-6,
+    'honey made matches the rate over the time actually ripened',
+    `${made.toFixed(4)} vs ${expected.toFixed(4)} (rate ${rate.toFixed(4)}/s × ${processed.toFixed(3)} s)`);
+  check(Math.abs(comb.stores.honey - (before.honey + made)) < 1e-6,
+    'the honey store holds what was made', `${comb.stores.honey.toFixed(4)}`);
+  const drained = before.nectar - resources.nectar;
+  check(Math.abs(drained - made * perHoney) < 1e-6,
+    'nectar is drawn at the configured ratio',
+    `${drained.toFixed(4)} nectar for ${made.toFixed(4)} honey (${perHoney.toFixed(2)} per)`);
+
+  // The airflow bonus is what makes a bank of honey cells worth building.
+  const partner = grid.neighbors(spot.col, spot.row, 0).find((n) => !grid.has(n.col, n.row, n.layer));
+  await comb.place(partner.col, partner.row, partner.layer, 'honey');
+  run(comb, honeyType.buildTime + 1);
+  const staff = comb.staffing.fanning;
+  const bonus = Math.min(honeyType.bonus.max, honeyType.bonus.per * 1) * staff;
+  const expectedRate = 2 * honeyType.effects.convert.rate * (1 + bonus);
+  check(Math.abs(comb.effects.convertRate - expectedRate) < 1e-9,
+    'adjacent honey stores ripen faster than two lone ones',
+    `${comb.effects.convertRate.toFixed(5)}/s vs ${expectedRate.toFixed(5)}/s (+${(bonus * 100).toFixed(0)}% airflow)`);
+  comb.dispose();
+});
+
+// ---------------------------------------------------------------- 7 · demolition
+
+await withDeadline('demolition', async () => {
+  section('demolition');
+  const { grid, resources, comb } = makeComb({ baseCapacity: RICH });
+  fund(resources, comb, { pollen: 900, nectar: 900, resin: 900 });
+  const type = CELL_BY_ID.get('honey');
+  const cost = costOf('honey');
+
+  const a = freeSpot(grid);
+  await comb.place(a.col, a.row, 0, 'honey');
+  const b = grid.neighbors(a.col, a.row, 0).find((n) => !grid.has(n.col, n.row, n.layer));
+  await comb.place(b.col, b.row, b.layer, 'honey');
+  run(comb, type.buildTime + 1);
+
+  const beforeResin = resources.resin;
+  const result = await comb.demolish(b.col, b.row, b.layer);
+  const expected = refundOf('honey').resin;
+  check(result.ok, 'a cell can be torn down');
+  check(Math.abs((resources.resin - beforeResin) - expected) < 1e-6,
+    'demolition refunds the stated fraction of the resin',
+    `+${(resources.resin - beforeResin).toFixed(2)} of ${cost.resin} spent (fraction ${COMB_TUNING.refundFraction})`);
+  check(!comb.cellAt(b.col, b.row, 0) && comb.cells.size === 1,
+    'the cell is gone from the lattice', `${comb.cells.size} cell(s) left`);
+
+  // A chain of three: pulling the middle one out would strand the end.
+  const c = grid.neighbors(a.col, a.row, 0).find((n) => !grid.has(n.col, n.row, n.layer));
+  await comb.place(c.col, c.row, 0, 'pollen');
+  const d = grid.neighbors(c.col, c.row, 0)
+    .find((n) => !grid.has(n.col, n.row, n.layer) && !grid.neighbors(a.col, a.row, 0)
+      .some((m) => m.col === n.col && m.row === n.row && m.layer === n.layer));
+  if (d) {
+    await comb.place(d.col, d.row, d.layer, 'pollen');
+    const split = await comb.demolish(c.col, c.row, 0);
+    check(!split.ok && split.reason === 'split',
+      'a demolition that would cut the comb in two is refused', `reason "${split.reason}"`);
+  } else {
+    fail('a demolition that would cut the comb in two is refused', 'no chain geometry available');
+  }
+  comb.dispose();
+});
+
+// ---------------------------------------------------------------- 8 · build-mode aiming
+
+await withDeadline('build mode', async () => {
+  section('build mode');
+  const { grid, resources, comb } = makeComb({ baseCapacity: RICH });
+  fund(resources, comb, { pollen: 900, nectar: 900, resin: 900 });
+  const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 500);
+  const build = createBuildMode({ comb, camera, scene: null, listen: false, reach: 200 });
+
+  // Stand in the middle of the hall looking at wall 0 (max Z).
+  const target = freeSpot(grid);
+  const wanted = new THREE.Vector3();
+  grid.cellCenter(target.col, target.row, 0, wanted);
+  camera.position.set(wanted.x, wanted.y, (VOLUME.minZ + VOLUME.maxZ) * 0.5);
+  camera.lookAt(wanted);
+  camera.updateMatrixWorld(true);
+
+  build.open();
+  build.refresh();
+  const hitKey = build.state.target ? grid.key(build.state.target.col, build.state.target.row, build.state.target.layer) : '—';
+  check(build.state.target && build.state.target.layer === 0 && hitKey === grid.key(target.col, target.row, 0),
+    'the ray lands on the hex the camera is aimed at', `${hitKey} (wanted ${grid.key(target.col, target.row, 0)})`);
+  check(build.state.valid, 'an empty wall cell reads as placeable', `reason "${build.state.reason}"`);
+
+  const placed = await build.commit();
+  check(placed && placed.ok && comb.cells.size === 1, 'left click places the ghost', `${comb.cells.size} cell`);
+
+  build.refresh();
+  check(build.state.target && build.state.target.layer === 1,
+    'aiming at a built cell moves the ghost one layer inward',
+    `layer ${build.state.target && build.state.target.layer}`);
+  check(build.state.hover && build.state.hover.key === grid.key(target.col, target.row, 0),
+    'the cell under the cursor is offered for demolition', `${build.state.hover && build.state.hover.key}`);
+
+  const list = comb.unlockedTypes();
+  const startType = build.state.typeId;
+  build.cycle(1);
+  check(build.state.typeId !== startType && list.includes(build.state.typeId),
+    'Q/E cycles the unlocked types', `${startType} → ${build.state.typeId} of ${list.length}`);
+
+  const torn = await build.tearDown();
+  check(torn && torn.ok && comb.cells.size === 0, 'the aimed cell can be torn down', `${comb.cells.size} cells left`);
+  build.dispose();
+  comb.dispose();
+});
+
+// ---------------------------------------------------------------- 9 · two queens, one cell
+
+const CODE = `COMBTEST${Math.floor(Math.random() * 900 + 100)}`;
+try { localStorage.removeItem(NET.local.storagePrefix + CODE.toUpperCase()); } catch (error) { /* ignore */ }
+
+const nets = [];
+function makeNet(name, mode) {
+  const handle = createNet({
+    mode, code: CODE, driver: 'local', profile: { name, color: 'amber', pattern: 'banded' },
+  });
+  nets.push(handle);
+  return handle;
+}
+
+let sharedCost = null;
+let claimedKey = null;
+
+await withDeadline('contention', async () => {
+  section('two queens, one cell');
+  const netA = makeNet('Ada', 'host');
+  const netB = makeNet('Bee', 'join');
+  await Promise.all([netA.ready, netB.ready]);
+
+  // Fund the shared bank once; both clients spend from it.
+  await netA.bank.deposit('pollen', 200);
+  await netA.bank.deposit('nectar', 200);
+  await netA.bank.deposit('resin', 200);
+  await sleep(200);
+
+  const gridA = makeGrid();
+  const gridB = makeGrid();
+  const combA = createComb({ grid: gridA, entrance: ENTRANCE, net: netA, scene: null });
+  const combB = createComb({ grid: gridB, entrance: ENTRANCE, net: netB, scene: null });
+  await sleep(200);
+
+  const spot = freeSpot(gridA);
+  claimedKey = KEY_OF(gridA, spot);
+  sharedCost = costOf('pollen');
+  const before = netA.bank.snapshot();
+
+  const [ra, rb] = await Promise.all([
+    combA.place(spot.col, spot.row, 0, 'pollen'),
+    combB.place(spot.col, spot.row, 0, 'pollen'),
+  ]);
+  await sleep(400);
+
+  const winners = [ra, rb].filter((r) => r && r.ok).length;
+  check(winners === 1, 'exactly one of two simultaneous claims succeeds',
+    `A ${ra.ok ? 'won' : `lost (${ra.reason})`}, B ${rb.ok ? 'won' : `lost (${rb.reason})`}`);
+
+  const record = await netA.comb.get('cells');
+  const keys = record ? Object.keys(record).filter((k) => record[k]) : [];
+  check(keys.length === 1 && keys[0] === claimedKey,
+    'the shared record holds exactly one cell', `${keys.length} key(s): ${keys.join(', ') || '—'}`);
+
+  const after = netA.bank.snapshot();
+  const spent = {};
+  let chargeOk = true;
+  for (const kind of ['pollen', 'nectar', 'resin']) {
+    spent[kind] = before[kind] - after[kind];
+    if (Math.abs(spent[kind] - sharedCost[kind]) > 1e-6) chargeOk = false;
+  }
+  check(chargeOk, 'the bank is charged exactly once',
+    `spent ${JSON.stringify(spent)} vs one cell at ${JSON.stringify(sharedCost)}`);
+
+  check(combA.cells.size === 1 && combB.cells.size === 1,
+    'the placement shows up for the other queen too',
+    `A ${combA.cells.size}, B ${combB.cells.size}`);
+
+  // Grow the hive a little so the joiner has something non-trivial to rebuild.
+  const neighbours = gridA.neighbors(spot.col, spot.row, 0).slice(0, 3);
+  for (const n of neighbours) await combA.place(n.col, n.row, n.layer, 'pollen');
+  await sleep(300);
+  check(combB.cells.size === combA.cells.size,
+    'later placements replicate as well', `A ${combA.cells.size}, B ${combB.cells.size}`);
+
+  window.__combA = combA;
+  window.__combB = combB;
+}, 60000);
+
+// ---------------------------------------------------------------- 10 · joiner
+
+await withDeadline('joiner', async () => {
+  section('joining an established hive');
+  const combA = window.__combA;
+  if (!combA) { fail('a joiner rebuilds the comb identically', 'no established hive from the previous case'); return; }
+  const netC = makeNet('Cy', 'join');
+  await netC.ready;
+  const gridC = makeGrid();
+  const combC = createComb({ grid: gridC, entrance: ENTRANCE, net: netC, scene: null });
+  await sleep(500);
+
+  const want = combA.snapshot();
+  const got = combC.snapshot();
+  const wantKeys = Object.keys(want).sort();
+  const gotKeys = Object.keys(got).sort();
+  let same = wantKeys.length === gotKeys.length && wantKeys.length > 0;
+  for (let i = 0; same && i < wantKeys.length; i++) {
+    if (wantKeys[i] !== gotKeys[i]) same = false;
+    else if (want[wantKeys[i]].t !== got[gotKeys[i]].t) same = false;
+  }
+  check(same, 'a joiner rebuilds the established comb identically',
+    `${gotKeys.length} of ${wantKeys.length} cells, same keys and types: ${same}`);
+
+  const capSame = Math.abs(combC.capacity.pollen - combA.capacity.pollen) < 1e-6;
+  check(capSame, 'the joiner derives the same store capacity',
+    `${combC.capacity.pollen.toFixed(2)} vs ${combA.capacity.pollen.toFixed(2)}`);
+
+  const anyDone = Array.from(combC.cells.values()).every((c) => c.done || c.progress > 0);
+  check(anyDone, 'cells placed before the join are not restarted from zero',
+    `progress ${Array.from(combC.cells.values()).map((c) => c.progress.toFixed(2)).join(' ')}`);
+  combC.dispose();
+}, 60000);
+
+for (const handle of nets) { try { handle.dispose(); } catch (error) { /* ignore */ } }
+
+// ---------------------------------------------------------------- 11 · 500 cells
+
+await withDeadline('performance', async () => {
+  section('a 500-cell comb');
+  const grid = makeGrid();
+  const resources = createResources();
+  const scene = new THREE.Scene();
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x442200, 1.4));
+  const comb = createComb({ grid, resources, entrance: ENTRANCE, scene, baseCapacity: RICH });
+  fund(resources, comb, { pollen: 4000, nectar: 4000, resin: 4000 });
+
+  const WANT = 500;
+  const t0 = nowMs();
+  let row = Math.floor(grid.rows * 0.5);
+  let placed = 0;
+  let col = 0;
+  while (placed < WANT && row <= grid.rows) {
+    if (col >= grid.columns) { col = 0; row++; continue; }
+    if (grid.isValid(col, row, 0)) {
+      const r = await comb.place(col, row, 0, placed % 3 === 0 ? 'honey' : 'pollen');
+      if (r.ok) placed++;
+    }
+    col++;
+  }
+  const buildMs = nowMs() - t0;
+  check(placed === WANT, `${WANT} cells placed`, `${placed} in ${buildMs.toFixed(0)} ms (${(buildMs / Math.max(1, placed)).toFixed(2)} ms/cell incl. recompute)`);
+
+  // Finish construction, then measure a comb that is not changing.
+  run(comb, 20);
+  const stillBuilding = comb.effects.buildingCount;
+  const writesBefore = comb.stats.matrixWrites;
+  const FRAMES = 600;
+  const t1 = nowMs();
+  for (let i = 0; i < FRAMES; i++) comb.update(1 / 60);
+  const updateMs = (nowMs() - t1) / FRAMES;
+  const writes = comb.stats.matrixWrites - writesBefore;
+  check(stillBuilding === 0 && writes === 0,
+    'a finished comb writes no instance matrices per frame',
+    `${writes} matrix writes over ${FRAMES} frames, ${stillBuilding} still building`);
+  check(updateMs < 0.5, 'comb.update() cost per frame',
+    `${updateMs.toFixed(4)} ms/frame over ${FRAMES} frames (budget 0.5 ms of the 25 ms at 40 fps)`);
+
+  // A real draw, so the per-frame number includes the GPU submission, not just logic.
+  let renderMs = null;
+  let calls = null;
+  let tris = null;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 960; canvas.height = 600;
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+    renderer.setSize(960, 600, false);
+    const camera = new THREE.PerspectiveCamera(60, 1.6, 0.1, 500);
+    camera.position.set(0, 20, 0);
+    camera.lookAt(0, 20, VOLUME.maxZ);
+    renderer.render(scene, camera);
+    const N = 120;
+    const t2 = nowMs();
+    for (let i = 0; i < N; i++) { comb.update(1 / 60); renderer.render(scene, camera); }
+    renderMs = (nowMs() - t2) / N;
+    calls = renderer.info.render.calls;
+    tris = renderer.info.render.triangles;
+    renderer.dispose();
+  } catch (error) {
+    renderMs = null;
+  }
+  if (renderMs === null) {
+    log(`NOTE  no WebGL context available — draw cost not measured`);
+  } else {
+    check(renderMs < 25, 'update + draw of the 500-cell comb fits the 40 fps budget',
+      `${renderMs.toFixed(3)} ms/frame, ${calls} draw calls, ${tris} triangles (25 ms budget)`);
+  }
+  comb.dispose();
+}, 120000);
+
+// ---------------------------------------------------------------- summary
+
+section('summary');
+log(`${passed} passed, ${failed} failed`);
+document.title = failed ? `FAIL (${failed})` : `PASS (${passed})`;
+</script>
+</body>
+</html>
