@@ -31,9 +31,24 @@ export const NET = {
     idleMoveEpsilon: 0.05, // metres of movement below which a frame counts as idle
     idleTurnEpsilon: 0.01, // quaternion component delta below which a frame counts as idle
     swarmHz: 1,            // swarm composition only ever goes out when it changes
-    presenceHeartbeatSec: 4,
     presenceStaleSec: 12,  // presence entries older than this are treated as gone
-    worldClockSyncSec: 30, // authority refreshes bank.lastActive at this interval
+    worldClockSyncSec: 30, // the owner refreshes bank.lastActive at this interval
+
+    // The heartbeat runs on setInterval, NOT on the frame loop: src/core/loop.js stops
+    // requestAnimationFrame when the tab is hidden, and a heartbeat that stops with it
+    // lets a hidden client keep believing it owns the world simulation.
+    heartbeatSec: 3,
+
+    // World-simulation ownership is a LEASE, not an inference. The owner holds
+    // world/lease with a server-timestamped expiry and renews it; everyone else reads
+    // it. Expiry is evaluated against the local server-corrected clock, so a client
+    // that goes quiet drops its own claim with no network round trip — which is what
+    // makes "never two owners at once" hold even for a frozen tab.
+    leaseSec: 9,           // how long a claim is good for
+    leaseGraceSec: 2,      // a non-lowest client waits this long past expiry before claiming
+    // A client that has not called update() for this long is not simulating anything,
+    // so it must neither renew its lease nor claim one.
+    simStaleSec: 4,
   },
 
   interpolation: {

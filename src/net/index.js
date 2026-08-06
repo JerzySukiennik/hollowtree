@@ -5,7 +5,7 @@ import { NET } from '../config.net.js';
 import { createLocalDriver } from './driver-local.js';
 import { createFirebaseDriver, firebaseConfigured } from './driver-firebase.js';
 import { createInterpolator } from './interpolation.js';
-import { computeOfflineGrant, seasonAt } from './offline.js';
+import { computeOfflineGrant, regrownAmount, seasonAt } from './offline.js';
 import {
   joinPath, makeUid, normalizeHiveCode, packMotion, sameSwarm, sanitizeSwarm, unpackMotion,
 } from './util.js';
@@ -77,10 +77,11 @@ export function createNet(session) {
   const W = {
     epoch: joinPath(P.world, 'epoch'),
     host: joinPath(P.world, 'host'),
+    lease: joinPath(P.world, 'lease'),
     meta: joinPath(P.world, 'meta'),
     contrib: joinPath(P.world, 'contrib'),
   };
-  const RESERVED = ['epoch', 'host', 'meta', 'contrib'];
+  const RESERVED = ['epoch', 'host', 'lease', 'meta', 'contrib', 'flowers', 'weather'];
 
   const peers = new Map();
   const joinListeners = [];
@@ -101,11 +102,17 @@ export function createNet(session) {
   let bankState = emptyBank();
   let offlineReport = null;
 
-  let sendAccumulator = 0;
-  let heartbeatAccumulator = 0;
-  let clockAccumulator = 0;
-  let pruneAccumulator = 0;
+  let lastMotionAt = 0;
+  let lastClockSyncAt = 0;
   let seq = 0;
+  let lease = null;
+  let lastUpdateAt = 0;
+  let vacantSince = 0;
+  let motionSends = 0;
+  let weatherState = null;
+  const flowerCache = new Map();
+  let heartbeatTimer = null;
+  let wasSimulating = false;
 
   const pending = {
     position: { x: 0, y: 0, z: 0 },
@@ -124,6 +131,13 @@ export function createNet(session) {
   };
   let lastMetaSent = null;
 
+  function normalizeFlower(value) {
+    return {
+      a: Number(value && value.a) || 0,
+      d: Number(value && value.d) || 0,
+    };
+  }
+
   function fire(list, ...args) {
     for (const fn of list.slice()) {
       try { fn(...args); } catch (error) { console.warn('[net] listener failed —', error && error.message); }
@@ -134,27 +148,116 @@ export function createNet(session) {
     return driver ? driver.now() : Date.now();
   }
 
+  // Every presence entry whose heartbeat is recent enough to count, including our own
+  // only when we are actually simulating. A frozen client must not keep voting for
+  // itself — that is precisely how two owners used to coexist.
   function livePresenceUids() {
-    const cutoff = now() - NET.rates.presenceStaleSec * 1000;
+    const at = now();
+    const cutoff = at - NET.rates.presenceStaleSec * 1000;
     const out = [];
     for (const [id, entry] of presenceRaw) {
-      if (id === uid) { out.push(id); continue; }
       const seen = Number(entry && entry.at) || 0;
+      if (id === uid) {
+        if (simulating(at)) out.push(id);
+        continue;
+      }
       if (seen && seen < cutoff) continue;
       out.push(id);
     }
-    if (uid && out.indexOf(uid) === -1) out.push(uid);
+    if (uid && simulating(at) && out.indexOf(uid) === -1) out.push(uid);
     return out.sort();
   }
 
+  // update() has been called recently enough that this client is really running the
+  // world forward. A backgrounded tab stops calling it, so this goes false on its own.
+  function simulating(at) {
+    const stamp = at || now();
+    return lastUpdateAt > 0 && stamp - lastUpdateAt < NET.rates.simStaleSec * 1000;
+  }
+
+  function leaseLive(value, at) {
+    return Boolean(value && value.uid && Number(value.exp) > at);
+  }
+
+  // The owner is whoever holds an unexpired lease — a pure function of the last lease
+  // we saw and our server-corrected clock. No network is needed to notice our own
+  // claim has run out, which is what makes expiry self-healing in a frozen tab.
+  function ownerUid() {
+    const at = now();
+    return leaseLive(lease, at) ? lease.uid : null;
+  }
+
+  // The live answer to "am I the world simulation owner right now".
+  function owns() {
+    return ownerUid() === uid && simulating();
+  }
+
   function recomputeAuthority() {
-    const live = livePresenceUids();
-    const owner = live.length ? live[0] : uid;
-    const mine = owner === uid;
+    const owner = ownerUid();
+    // Remember when the lease first looked vacant: the grace period a non-lowest
+    // client waits out is measured from here.
+    if (owner) vacantSince = 0;
+    else if (!vacantSince) vacantSince = now();
+    const mine = owns();
     for (const [id, peer] of peers) peer.authority = id === owner;
     if (mine === isAuthority) return;
     isAuthority = mine;
     fire(authorityListeners, isAuthority, owner);
+  }
+
+  // Take the lease if it is vacant or expired, renew it if it is already ours, and
+  // never touch it while somebody else's claim is still good. One transaction, so two
+  // clients racing for a vacant lease cannot both win.
+  async function tickLease() {
+    if (!driver || disposed) return;
+    const at = now();
+    if (!simulating(at)) {
+      // Not simulating: do not renew, do not claim. If the lease was ours it simply
+      // runs out, and the next client takes over cleanly.
+      recomputeAuthority();
+      return;
+    }
+    const mineAlready = leaseLive(lease, at) && lease.uid === uid;
+    if (!mineAlready) {
+      // Somebody else's claim is still good — leave it strictly alone.
+      if (leaseLive(lease, at)) { recomputeAuthority(); return; }
+      // The lease is vacant. The master prompt wants the lowest id to own the world,
+      // so the lowest live client claims at once and everyone else waits out a grace
+      // period first. That keeps the choice deterministic instead of "whoever booted
+      // first", while still guaranteeing somebody takes over if the lowest is gone.
+      const live = livePresenceUids();
+      const lowest = live.length ? live[0] : uid;
+      if (lowest !== uid && at - vacantSince < NET.rates.leaseGraceSec * 1000) {
+        recomputeAuthority();
+        return;
+      }
+    }
+    const result = await driver.transact(W.lease, (current) => {
+      const stamp = now();
+      if (current && current.uid && current.uid !== uid && Number(current.exp) > stamp) {
+        return undefined; // somebody else holds a good lease — leave it alone
+      }
+      return { uid, exp: stamp + NET.rates.leaseSec * 1000 };
+    });
+    if (result.committed && result.value) lease = result.value;
+    recomputeAuthority();
+  }
+
+  function applyLease(value) {
+    lease = value && typeof value === 'object' ? value : null;
+    recomputeAuthority();
+  }
+
+  async function releaseLease() {
+    if (!driver) return;
+    try {
+      await driver.transact(W.lease, (current) => {
+        if (!current || current.uid !== uid) return undefined;
+        return { uid: '', exp: 0 };
+      });
+    } catch (error) {
+      // Leaving without releasing is survivable: the lease expires on its own.
+    }
   }
 
   function ensurePeer(id) {
@@ -354,7 +457,9 @@ export function createNet(session) {
       for (const kind of Object.keys(wanted)) {
         if ((Number(base[kind]) || 0) + 1e-6 < wanted[kind]) return undefined; // abort, nothing changes
       }
-      for (const kind of Object.keys(wanted)) base[kind] = (Number(base[kind]) || 0) - wanted[kind];
+      // Clamp at zero: floating point can leave ~-5e-7, and the deployed rule
+      // (newData.val() >= 0) rejects the whole transaction for it.
+      for (const kind of Object.keys(wanted)) base[kind] = Math.max(0, (Number(base[kind]) || 0) - wanted[kind]);
       base.lastActive = now();
       return base;
     });
@@ -458,6 +563,7 @@ export function createNet(session) {
       pending.velocity.z = (pending.position.z - lastSent.position.z) / span;
     }
     seq = (seq + 1) & 0xffff;
+    motionSends++;
     const text = packMotion(seq, t - epoch, pending.position, pending.quaternion, pending.velocity, pending.carrying);
     driver.set(joinPath(P.queens, uid, 'p'), text).catch(() => {});
     lastSent.position.x = pending.position.x;
@@ -478,18 +584,78 @@ export function createNet(session) {
     }
   }
 
+  // Presence, lease and reaping run on a timer, never on the frame loop, so a hidden
+  // tab either keeps its claim alive or loses it cleanly — never both.
+  function startHeartbeat() {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(() => { onHeartbeat().catch(() => {}); }, NET.rates.heartbeatSec * 1000);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+
+  async function onHeartbeat() {
+    if (disposed || !driver || !uid) return;
+    if (simulating()) {
+      // A client reaped while it was frozen has lost its presence AND its metadata.
+      // Coming back has to restore both, or its colour, pattern, swarm and ready flag
+      // are gone from every roster for the rest of the session.
+      driver.set(joinPath(P.presence, uid), { name: profile.name, at: now() }).catch(() => {});
+      if (!metaRaw.has(uid)) pushMeta();
+    }
+    else wasSimulating = false;
+    prunePresence();
+    await tickLease();
+  }
+
+  function prunePresence() {
+    if (!driver) return;
+    const cutoff = now() - NET.rates.presenceStaleSec * 1000;
+    let pruned = false;
+    for (const [id, entry] of Array.from(presenceRaw)) {
+      if (id === uid) continue;
+      const seen = Number(entry && entry.at) || 0;
+      if (!seen || seen >= cutoff) continue;
+      presenceRaw.delete(id);
+      dropPeer(id);
+      pruned = true;
+      if (owns()) {
+        driver.remove(joinPath(P.presence, id)).catch(() => {});
+        driver.remove(joinPath(P.queens, id)).catch(() => {});
+        driver.remove(joinPath(W.meta, id)).catch(() => {});
+      }
+    }
+    recomputeAuthority();
+    if (pruned) emitPresence();
+  }
+
   function update(dt) {
     if (disposed || !driver || !uid) return;
     const step = Number.isFinite(dt) && dt > 0 ? Math.min(dt, 0.25) : 0;
 
-    sendAccumulator += step;
-    const interval = 1 / NET.rates.motionHz;
-    const idleInterval = 1 / NET.rates.idleMotionHz;
-    if (sendAccumulator >= interval) {
+    // Detect the stall from the clock rather than from a flag the heartbeat maintains:
+    // a hidden tab may have had its timers throttled too, and the roster still has to
+    // heal on resume.
+    const at = now();
+    const resumed = !wasSimulating || (lastUpdateAt > 0 && at - lastUpdateAt >= NET.rates.simStaleSec * 1000);
+    lastUpdateAt = at;
+    if (resumed) {
+      wasSimulating = true;
+      driver.set(joinPath(P.presence, uid), { name: profile.name, at }).catch(() => {});
+      pushMeta();
+      tickLease().catch(() => {});
+    }
+
+    // Throttle on the wall clock, not on accumulated dt. dt is clamped per frame, so
+    // a couple of long frames would silently drop the publish rate below 10 Hz.
+    const sinceSend = lastMotionAt ? at - lastMotionAt : Infinity;
+    if (sinceSend >= 1000 / NET.rates.motionHz) {
       const idle = !movedEnough();
-      if (!idle || sendAccumulator >= idleInterval) {
+      if (!idle || sinceSend >= 1000 / NET.rates.idleMotionHz) {
         sendMotion();
-        sendAccumulator = 0;
+        lastMotionAt = at;
       }
     }
 
@@ -501,38 +667,10 @@ export function createNet(session) {
       peer.extrapolating = out.extrapolating;
     }
 
-    heartbeatAccumulator += step;
-    if (heartbeatAccumulator >= NET.rates.presenceHeartbeatSec) {
-      heartbeatAccumulator = 0;
-      driver.set(joinPath(P.presence, uid), { name: profile.name, at: now() }).catch(() => {});
-    }
-
-    pruneAccumulator += step;
-    if (pruneAccumulator >= 1) {
-      pruneAccumulator = 0;
-      const cutoff = now() - NET.rates.presenceStaleSec * 1000;
-      let pruned = false;
-      for (const [id, entry] of Array.from(presenceRaw)) {
-        if (id === uid) continue;
-        const seen = Number(entry && entry.at) || 0;
-        if (!seen || seen >= cutoff) continue;
-        presenceRaw.delete(id);
-        dropPeer(id);
-        pruned = true;
-        if (isAuthority) {
-          driver.remove(joinPath(P.presence, id)).catch(() => {});
-          driver.remove(joinPath(P.queens, id)).catch(() => {});
-          driver.remove(joinPath(W.meta, id)).catch(() => {});
-        }
-      }
-      recomputeAuthority();
-      if (pruned) emitPresence();
-    }
-
-    if (isAuthority) {
-      clockAccumulator += step;
-      if (clockAccumulator >= NET.rates.worldClockSyncSec) {
-        clockAccumulator = 0;
+    if (owns()) {
+      if (!lastClockSyncAt) lastClockSyncAt = at;
+      else if (at - lastClockSyncAt >= NET.rates.worldClockSyncSec * 1000) {
+        lastClockSyncAt = at;
         mutateBank((base) => { base.lastActive = now(); return base; }).catch(() => {});
       }
     }
@@ -575,16 +713,27 @@ export function createNet(session) {
       onChange: applyQueen,
     }));
     subs.push(driver.subscribe(P.bank, applyBank));
+    subs.push(driver.subscribe(W.lease, applyLease));
 
     await settleOffline();
-    recomputeAuthority();
+
+    // Count as simulating from the moment we are ready, so the first lease tick can
+    // claim; update() keeps it true from here on.
+    lastUpdateAt = now();
+    wasSimulating = true;
+    await tickLease();
+    startHeartbeat();
 
     return { uid, code, isAuthority, driver: driver.kind };
   })();
 
   function dispose() {
     if (disposed) return;
+    // Hand the lease back before tearing down, so the next client takes over at once
+    // instead of waiting out the expiry.
+    releaseLease().catch(() => {});
     disposed = true;
+    stopHeartbeat();
     for (const off of subs) {
       try { off(); } catch (error) { /* already detached */ }
     }
@@ -630,6 +779,9 @@ export function createNet(session) {
     get profile() { return profile; },
     get offlineReport() { return offlineReport; },
     get hostUid() { return hostUid; },
+    // Motion publishes only, so the send throttle can be measured without counting
+    // presence heartbeats and lease renewals as if they were queen updates.
+    get motionSends() { return motionSends; },
 
     setPresence(patch) {
       if (!driver || !uid || !patch) return Promise.resolve();
@@ -715,6 +867,78 @@ export function createNet(session) {
       },
     },
 
+    // Flower reserves: shared, transactional, and regrown from server timestamps
+    // rather than from a local dt, so three queens stripping one meadow really do
+    // exhaust it and it really does refill between sessions.
+    flowers: {
+      // spec: { max, regrowth (units/sec), regrowDelay (sec) }
+      amount(id, spec) {
+        const entry = flowerCache.get(id);
+        const max = Number(spec && spec.max) || 0;
+        if (!entry) return max;
+        return regrownAmount({
+          stored: entry.a,
+          drainedAt: entry.d,
+          now: now(),
+          max,
+          ratePerSec: Number(spec && spec.regrowth) || 0,
+          delaySec: Number(spec && spec.regrowDelay) || 0,
+        });
+      },
+      // Returns how much was actually taken — never more than the flower still has,
+      // even if two queens hit it in the same tick.
+      async drain(id, want, spec) {
+        if (!driver || !(want > 0)) return 0;
+        const max = Number(spec && spec.max) || 0;
+        const rate = Number(spec && spec.regrowth) || 0;
+        const delay = Number(spec && spec.regrowDelay) || 0;
+        let taken = 0;
+        await driver.transact(joinPath(P.world, 'flowers', id), (current) => {
+          const stamp = now();
+          const available = regrownAmount({
+            stored: current ? Number(current.a) : max,
+            drainedAt: current ? Number(current.d) : 0,
+            now: stamp,
+            max,
+            ratePerSec: rate,
+            delaySec: delay,
+          });
+          taken = Math.min(available, want);
+          if (taken <= 0) { taken = 0; return undefined; }
+          return { a: available - taken, d: stamp };
+        });
+        return taken;
+      },
+      subscribe(cb) {
+        if (!driver) return () => {};
+        return driver.subscribeChildren(joinPath(P.world, 'flowers'), {
+          onAdd: (id, value) => { flowerCache.set(id, normalizeFlower(value)); cb(id, flowerCache.get(id)); },
+          onChange: (id, value) => { flowerCache.set(id, normalizeFlower(value)); cb(id, flowerCache.get(id)); },
+          onRemove: (id) => { flowerCache.delete(id); cb(id, null); },
+        });
+      },
+    },
+
+    // Weather is scheduled by the one owner and read by everyone, stamped in server
+    // time so a client's own clock can never shift the storm.
+    weather: {
+      current() { return weatherState ? { ...weatherState } : null; },
+      subscribe(cb) {
+        if (!driver) return () => {};
+        return driver.subscribe(joinPath(P.world, 'weather'), (value) => {
+          weatherState = value && typeof value === 'object' ? value : null;
+          cb(weatherState ? { ...weatherState } : null);
+        });
+      },
+      // Owner only. Pass { kind, intensity, seed, durationMs }; startedAt is stamped here.
+      set(entry) {
+        if (!driver || !owns() || !entry) return Promise.resolve(false);
+        return driver
+          .set(joinPath(P.world, 'weather'), { ...entry, startedAt: now() })
+          .then(() => true, () => false);
+      },
+    },
+
     // The comb (nest cells) has its own subtree in the deployed rules.
     comb: {
       get(path) { return driver ? driver.get(joinPath(P.comb, path)) : Promise.resolve(null); },
@@ -730,8 +954,12 @@ export function createNet(session) {
     },
 
     authority: {
-      isMine() { return isAuthority; },
-      owner() { const live = livePresenceUids(); return live.length ? live[0] : uid; },
+      // Evaluated against the clock every call, so a client that has stopped ticking
+      // reports false immediately — no network round trip, no dual-owner window.
+      isMine() { return ownerUid() === uid && simulating(); },
+      owner() { return ownerUid(); },
+      get lease() { return lease ? { ...lease } : null; },
+      expiresIn() { return lease ? Math.max(0, Number(lease.exp) - now()) : 0; },
       onChange(cb) {
         if (typeof cb !== 'function') return () => {};
         authorityListeners.push(cb);
@@ -749,6 +977,7 @@ export function createNet(session) {
       return {
         ...driver.stats,
         driver: driver.kind,
+        motionSends,
         seconds: elapsed,
         upBytesPerSecond: driver.stats.bytesSent / elapsed,
         downBytesPerSecond: driver.stats.bytesReceived / elapsed,
@@ -774,6 +1003,6 @@ function soloCode() {
   return normalizeHiveCode('');
 }
 
-export { computeOfflineGrant, seasonAt } from './offline.js';
+export { computeOfflineGrant, regrownAmount, seasonAt } from './offline.js';
 export { createInterpolator } from './interpolation.js';
 export { makeHiveCode, normalizeHiveCode } from './util.js';

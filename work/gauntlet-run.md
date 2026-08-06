@@ -239,3 +239,103 @@ flower job if the tree keeps crashing the solver.
 - Second Brain learning: project note updated; three inbox notes written (Firebase MCP active-project trap, `getWorldPosition`
   before parenting, stale ES-module cache in the preview pane); `tools/build-indexes.py` run.
 - Resume condition: Blender revision builder finishes the tree weld and the flower fixes, then a fresh Critic re-reviews each.
+
+## Round 1 — netcode (independent Critic, specification conformance)
+
+- Critic identity: fresh-context Critic, read the code against the master prompt's authority model, ran both suites itself.
+- Critic verdict: **REJECT**, confidence high. Weighted **62/100**. Scores: authority conformance 2, concurrency 4,
+  failure handling 3, rules conformance 4, test integrity 3.
+- Gates: G1 PASS (40/0 and 21/0, counted independently), G2 PASS (no `set` on a resource path — every bank write is a
+  transaction), **G3 FAIL**, G4 PASS with listed exceptions, G5 PASS (all writes inside the five allowed subtrees, codes ≥8).
+- **Largest gap — permanent dual world-simulation ownership.** `loop.js:65-68` stops rAF on `visibilitychange`, which stops
+  `net.update` and therefore the 4 s presence heartbeat; the peer reaps the entry after 12 s and claims authority, while the
+  hidden client never revokes its own flag because `livePresenceUids()` unconditionally re-inserts its own uid
+  (`index.js:146`). Measured: after 15 s hidden, both clients report `isMine() === true`, with no self-healing until refocus.
+  A 44 ms dual-owner window on join was also reproduced. Authority is per-client inference over eventually-consistent
+  presence with no lease; the one transactional claim (`world/host`) is used only for lobby labels.
+- **This invalidates my own earlier verification.** I had checked authority once in a settled two-tab state, saw exactly one
+  owner, and reported it as correct. One settled sample cannot prove a single-owner invariant — the failure lives in the
+  transitions. Recorded as a verification lesson, not just a code bug.
+- Secondary: the whole authority + world-clock layer is **dead code with respect to the game** — nothing outside `src/net/`
+  reads `net.authority` or `net.world`; season is the literal `'summer'` in `main.js`, flower regrowth is local, weather runs
+  on client `Date.now()`. "The world advances while nobody plays" is a primitive, not a behaviour yet. Also: retry bounding and
+  backoff exist only in the local driver, which is the only one the tests exercise; a reaped-and-returning client permanently
+  loses its cosmetics; aggregate bandwidth is logged unasserted.
+- Decision: REJECT -> revision brief sent with the Critic's acceptance test (a case that samples `isMine()` on both clients
+  every 50 ms across a stall of 2x the stale window and passes only if zero samples show two owners).
+
+## Resumed after an API session limit (2026-08-06 17:00)
+
+Three agents were killed mid-work by the session limit. Their files survived; I verified each myself
+with the acceptance tests rather than trusting the partial reports:
+
+- **hollow-tree.glb — weld acceptance test PASSED.** Welding the trunk by position now yields **1 connected
+  component** (target <=2, was 22). 7212 tris total, 5212 trunk (budgets 12000 / 6000), height 74.0 base 0,
+  `entrance` at (-0.400, 16.000, 6.441) on +Z. Through-passage re-tested: 65 rays, **0 failures**.
+- **flowers — re-exported, harebell fix confirmed visually.** daisy 165 / clover 144 / harebell 149 tris, `head`
+  node in each, heights 4.603 / 3.900 / 6.300. The bells now hang from side branches; the green stripe across the
+  bloom is gone; the clover head reads as a floret cluster. Unfinished: thin ribbon leaflets, a hairline sliver
+  face on the harebell, and the bell colour overcorrected to near-white. Sent back.
+  (Note: my own crude triangle-intersection re-test reported 79 "hits" above y=4.5, but it grouped faces by vertex
+  colour and counted the legitimate peduncle-to-bell attachment. The render is decisive and the defect is gone —
+  recording this so the number is not mistaken later for a regression.)
+- **netcode — the authority fix landed and passes the acceptance test I set.** `47 passed, 1 failed`.
+  New case: *never two owners at any sampled instant during the stall* — **0 dual-owner samples of 474 over 24 s**,
+  plus 0 dual-owner samples in the handover case and the ticking client taking over. It honestly logs
+  `129 of 474 samples had no owner (the gap between expiry and the next claim)`.
+  Remaining failure: *the resumed client keeps its colour and pattern in the roster* — meta is republished and the
+  peer returns to the roster, but the cosmetic fields do not survive the reap-and-return on the peer's view.
+
+## Round 3 — hollow-tree.glb (weld)
+
+- Critic identity: fresh-context Critic (third distinct session on this asset), same rubric.
+- Critic verdict: **CONDITIONAL PASS**, confidence high. Weighted **90/100** (59 -> 81 -> 90).
+  Scores: silhouette 4, form 4, colour 5, spec 5, in-engine 5.
+- Gates: **G1-G5 all PASS.** Weld: 14 633 -> 2 606 verts, **1 connected component** (was 22), edge-use histogram
+  `{2: 7818}` — 0 boundary edges, 0 non-manifold, watertight, positive volume. Passage: 289 rays, 0 failures, centre
+  ray clear to z = -5.6 (12 units of depth). Spec: height 74.0000, base 0.00000, `entrance` 0.026 from the aperture
+  mouth plane. 7 212 tris (5 212 trunk). Colour defects from round 2 confirmed fixed: bark now 6 481 unique values
+  with only 0.02 % near max (was 25 % clamped), foliage 5 702 unique values (the mid-clump band is gone).
+- **The condition that blocks a full PASS:** the black slit flagged in round 2 is not fixed — it has grown into a
+  1-2 unit wide, 10.5 unit tall crevice at x 3.5-5.0, z 1.5-3.5 exposing the interior shell continuously from
+  y=23.5 to y=34. It is the first surface hit from both the front and the side camera, and renders as a pure-black
+  gash (743 px in front-entrance.png, 890 px in side.png) — a second, unauthored "hole" above the real entrance on a
+  prop that is on screen constantly.
+- Per the contract, CONDITIONAL PASS counts as rejection until the named condition is resolved and reverified.
+- Secondary: entrance still only ~4 px at 160x120 from a 45° approach; the silhouette carries no hollow cue (the
+  chamber's back wall makes the mask solid); the aperture is a 6.2 x 7.5 ellipse rather than the specified r=3.2
+  circle (clear radius 2.77 — safe for a 1-unit body); +X branch stubs end in flat caps.
+- Best-known candidate: hollow-tree.glb r3, 90/100.
+
+## Round 2 — netcode (after the lease rewrite)
+
+- Suites re-run by the orchestrator: `net-node` **49 passed / 0 failed**, `net-logic` **27 passed / 0 failed**.
+- The acceptance test I set is green: *never two owners at any sampled instant during the stall* — 0 dual-owner
+  samples of 472 over 24 s, the frozen client revokes its own claim (lease expires in 7501 ms), the ticking client
+  takes over, and the resumed client keeps its cosmetics in the peer's view and roster.
+- Authority is now a **server-timestamped lease** claimed by transaction, with presence/lease/reaping moved off the
+  rAF loop onto `setInterval` — so a hidden tab can no longer hold ownership. Honest cost, logged by the suite:
+  188 of 472 samples (~40 % of a 24 s stall) had *no* owner, the gap between lease expiry and the next claim.
+- The Firebase driver now enforces the retry bound itself instead of delegating to the SDK; `spend` clamps at zero
+  so a purchase cannot land a hair below zero and be rejected wholesale by the deployed rule.
+- A real bug surfaced while writing the new tests: a never-drained flower read as **empty** rather than full, which
+  would have started every meadow stripped bare.
+- Still true and unchanged: all concurrency numbers come from the local driver; real RTDB contention across the
+  internet is untested until three people are in a hive at once.
+
+## World clock wired into the game (orchestrator, 2026-08-06 17:4x)
+
+Closing the Critic's secondary gap "the authority and world-clock layer is dead code with respect to the game":
+
+- **Season** now comes from `net.world.seasonPhase()` per frame instead of the literal `'summer'` in `main.js`.
+  Verified live against Firebase: `window.hollowtree.season === 'spring'`, derived from the server epoch, identical
+  on every client with no syncing (it is pure arithmetic over one shared timestamp).
+- **Weather** is seeded once by the authority into `world/weather` with a seed derived from the hive code, and every
+  client subscribes and follows via `setFromWorld`. Because the weather chain is infinite and deterministic from
+  `(seed, startedAt)`, one write covers every future storm. Verified live: the published entry
+  `{kind:'clear', intensity:0.4, seed:1137309528, startedAt:1786030091621, durationMs:600000}` came back through the
+  subscription and the local weather adopted it, with no console errors.
+- **Flower reserves** are the remaining piece — still local per client, so the meadow is not yet shared and does not
+  regrow while nobody plays. Handed to a builder with the transactional API (`net.flowers.amount/drain/subscribe`)
+  and its own verification page.
+- Live database cleaned: both throwaway test hives (`RULECHECK1`, `RCWWC2TPJA`) deleted; `hives` is now empty.

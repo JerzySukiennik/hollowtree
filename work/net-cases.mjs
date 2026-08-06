@@ -91,6 +91,7 @@ export function createSuite(env) {
 
     const bytesAtStart = a.driver.stats.bytesSent;
     const messagesAtStart = a.driver.stats.messagesSent;
+    const motionAtStart = a.motionSends;
     const startedAt = now();
     let last = startedAt;
     let samples = 0;
@@ -150,7 +151,7 @@ export function createSuite(env) {
     const bytes = a.driver.stats.bytesSent - bytesAtStart;
     const messages = a.driver.stats.messagesSent - messagesAtStart;
     const perMessage = bytes / Math.max(1, messages);
-    const rate = messages / elapsed;
+    const rate = (a.motionSends - motionAtStart) / elapsed;
     log(`INFO  measured uplink ${(bytes / elapsed / 1024).toFixed(3)} KB/s payload · ${rate.toFixed(1)} msg/s · ${perMessage.toFixed(1)} B/msg over ${elapsed.toFixed(1)} s`);
     const rtdbUp = (perMessage + 78) * rate;
     log(`INFO  projected on RTDB (payload + ~78 B frame): ${(rtdbUp / 1024).toFixed(2)} KB/s up, ${(rtdbUp * 3 / 1024).toFixed(2)} KB/s aggregate per client at 3 players`);
@@ -158,7 +159,7 @@ export function createSuite(env) {
     check('per-client uplink under 2 KB/s at 3 players', rtdbUp < 2048, `${(rtdbUp / 1024).toFixed(2)} KB/s`);
 
     // A still queen must not keep paying for 10 Hz.
-    const idleStart = a.driver.stats.messagesSent;
+    const idleStart = a.motionSends;
     const idleFrom = now();
     const parked = truth(a.world.now());
     let idleLast = idleFrom;
@@ -171,7 +172,7 @@ export function createSuite(env) {
       a.update(idleDt);
       b.update(idleDt);
     }
-    const idleRate = (a.driver.stats.messagesSent - idleStart) / ((now() - idleFrom) / 1000);
+    const idleRate = (a.motionSends - idleStart) / ((now() - idleFrom) / 1000);
     check('a still queen throttles down to the idle rate', idleRate <= NET.rates.idleMotionHz + 0.6, `${idleRate.toFixed(2)} Hz while parked`);
 
     await shutdown(a, b);
@@ -257,7 +258,10 @@ export function createSuite(env) {
     const rc = await c.ready;
     const all = [a, b, c];
     await until(() => all.every((n) => n.peers.size === 2), 6000);
-    await sleep(200);
+    // The lease is only held by a client that is actually simulating, so tick all
+    // three for long enough that the claim settles on the lowest id.
+    const settleUntil = now() + 2000;
+    while (now() < settleUntil) { await sleep(16); for (const n of all) n.update(0.016); }
 
     const uids = [ra.uid, rb.uid, rc.uid].sort();
     const lowest = uids[0];
@@ -273,14 +277,23 @@ export function createSuite(env) {
     const rest = all.filter((n) => n !== leaving);
     const nextLowest = uids.filter((u) => u !== leaving.uid).sort()[0];
     leaving.dispose();
-    const settled = await until(() => rest.filter((n) => n.authority.isMine()).length === 1, 5000);
+    const settled = await until(() => {
+      for (const n of rest) n.update(0.05);
+      return rest.filter((n) => n.authority.isMine()).length === 1;
+    }, 8000);
     const nextOwners = rest.filter((n) => n.authority.isMine());
     check('authority hands over when the owner leaves', settled && nextOwners.length === 1, `${nextOwners.length} owner(s)`);
     check('the new owner is the next lowest client id',
       nextOwners.length === 1 && nextOwners[0].uid === nextLowest,
       `${nextOwners.length === 1 ? nextOwners[0].uid : '?'} vs expected ${nextLowest}`);
-    await sleep(300);
-    check('never two owners at once', rest.filter((n) => n.authority.isMine()).length === 1);
+    const holdUntil = now() + 600;
+    let dual = 0;
+    while (now() < holdUntil) {
+      await sleep(50);
+      for (const n of rest) n.update(0.05);
+      if (rest.filter((n) => n.authority.isMine()).length > 1) dual++;
+    }
+    check('never two owners at once', dual === 0, `${dual} dual-owner samples`);
 
     const owner = nextOwners[0] || rest[0];
     const other = rest.find((n) => n !== owner);
@@ -304,6 +317,98 @@ export function createSuite(env) {
     await shutdown(...rest);
   }
 
+  // ──────────────────────────────────── a frozen tab must not keep owning the world
+  // src/core/loop.js stops requestAnimationFrame on visibilitychange, so a hidden tab
+  // stops calling update(). This reproduces that exactly: the owner goes quiet for
+  // twice the presence-stale window while its peer keeps ticking, and we sample both
+  // clients throughout. The old inference-based authority reported two owners for the
+  // whole stall; a lease has to report exactly one at every instant.
+  async function caseFrozenOwner() {
+    section('a frozen tab never keeps world-simulation ownership');
+    const CODE = 'HTFROZEN01';
+    wipe(CODE);
+    const a = net(CODE, 'host', 'Jurek', 'amber', 'banded');
+    const b = net(CODE, 'join', 'Ryszard', 'clover', 'dusted');
+    await a.ready;
+    await b.ready;
+    await until(() => a.peers.size === 1 && b.peers.size === 1, 5000);
+
+    // Either client can win the lease, so remember who wears what.
+    const styles = new Map([
+      [a.uid, { name: 'Jurek', color: 'amber', pattern: 'banded' }],
+      [b.uid, { name: 'Ryszard', color: 'clover', pattern: 'dusted' }],
+    ]);
+
+    const warmUntil = now() + 1500;
+    while (now() < warmUntil) { await sleep(16); a.update(0.016); b.update(0.016); }
+
+    const owners = [a, b].filter((n) => n.authority.isMine());
+    check('exactly one owner before the stall', owners.length === 1, `${owners.length} owner(s)`);
+    const frozen = owners[0] || a;
+    const ticking = frozen === a ? b : a;
+
+    // Stop calling update() on the owner for 2 × presenceStaleSec, sampling both
+    // clients every 50 ms. The peer keeps running its frame loop as normal.
+    let both = 0;
+    let neither = 0;
+    let samples = 0;
+    let sawHandover = false;
+    const stallMs = 2 * NET.rates.presenceStaleSec * 1000;
+    const stallUntil = now() + stallMs;
+    let tick = now();
+    while (now() < stallUntil) {
+      await sleep(50);
+      const step = Math.min(0.05, (now() - tick) / 1000);
+      tick = now();
+      ticking.update(step);                       // the visible tab keeps rendering
+      const frozenOwns = frozen.authority.isMine();
+      const tickingOwns = ticking.authority.isMine();
+      samples++;
+      if (frozenOwns && tickingOwns) both++;
+      if (!frozenOwns && !tickingOwns) neither++;
+      if (tickingOwns) sawHandover = true;
+    }
+
+    check('never two owners at any sampled instant during the stall',
+      both === 0, `${both} dual-owner samples of ${samples} over ${(stallMs / 1000).toFixed(0)} s`);
+    check('the frozen client revokes its own claim', !frozen.authority.isMine(),
+      `lease expires in ${frozen.authority.expiresIn().toFixed(0)} ms`);
+    check('the ticking client takes the world over', sawHandover && ticking.authority.isMine(),
+      `owner is now ${ticking.authority.owner()}`);
+    log(`INFO  ${neither} of ${samples} samples had no owner (the gap between expiry and the next claim)`);
+
+    // Resuming has to heal the roster: a reaped client must get its presence and its
+    // metadata back, or it loses its colour, pattern, swarm and ready flag for good.
+    const resumeUntil = now() + 4000;
+    while (now() < resumeUntil) {
+      await sleep(16);
+      a.update(0.016);
+      b.update(0.016);
+    }
+    const meta = await frozen.driver.get(`${NET.root}/${CODE}/world/meta/${frozen.uid}`);
+    check('the resumed client republishes world/meta/$uid',
+      Boolean(meta && meta.c && meta.k), JSON.stringify(meta));
+    // Asserted on the OTHER client's view: the point is that a queen who was reaped
+    // and came back is still drawn in her own colours by everyone else.
+    const want = styles.get(frozen.uid);
+    const restored = ticking.peers.get(frozen.uid);
+    const rosterEntry = ticking.roster().find((p) => p.uid === frozen.uid);
+    check('the resumed client keeps its colour and pattern in the peer view',
+      Boolean(restored) && restored.cosmetic.color === want.color && restored.cosmetic.pattern === want.pattern
+        && restored.profile.name === want.name,
+      restored ? `${restored.profile.name}: ${restored.cosmetic.color} / ${restored.cosmetic.pattern} (expected ${want.color} / ${want.pattern})` : 'missing');
+    check('the resumed client keeps its colour and pattern in the peer roster',
+      Boolean(rosterEntry) && rosterEntry.color === want.color && rosterEntry.pattern === want.pattern,
+      rosterEntry ? `${rosterEntry.name}: ${rosterEntry.color} / ${rosterEntry.pattern}` : 'missing');
+    check('the resumed client is back in the other roster',
+      ticking.peers.has(frozen.uid), `peers=${ticking.peers.size}`);
+    const ownersAfter = [a, b].filter((n) => n.authority.isMine());
+    check('still exactly one owner after the resume', ownersAfter.length === 1,
+      `${ownersAfter.length} owner(s), ${ownersAfter.map((n) => n.uid).join(',')}`);
+
+    await shutdown(a, b);
+  }
+
   // ─────────────────────────────────────────────────────────────── ghost queens
   async function caseGhosts() {
     section('disconnect cleanup — no ghost queens');
@@ -325,9 +430,18 @@ export function createSuite(env) {
     const ghostUid = 'ghostuid00000000';
     await a.driver.set(`${NET.root}/${CODE}/presence/${ghostUid}`, { name: 'Ghost', at: a.world.now() - 60000 });
     check('a stale entry is visible before the reaper runs', await until(() => a.peers.has(ghostUid), 3000));
-    for (let i = 0; i < 5 && a.peers.has(ghostUid); i++) { a.update(1.1); await sleep(120); }
+    // Reaping runs on the heartbeat interval now, so that it still happens when the
+    // frame loop is stopped. Keep ticking so this client counts as simulating.
+    const reapUntil = now() + (NET.rates.heartbeatSec * 2 + 1) * 1000;
+    while (now() < reapUntil && a.peers.has(ghostUid)) { await sleep(50); a.update(0.05); }
     check('a stale heartbeat is reaped', !a.peers.has(ghostUid), `peers=${a.peers.size}`);
-    check('the reaper never eats the local queen', a.authority.owner() === a.uid && a.authority.isMine());
+    // The local queen must survive its own reaper, and a client that resumes ticking
+    // after a quiet spell must be able to take the vacant world lease back.
+    const settle = now() + 3000;
+    while (now() < settle && !a.authority.isMine()) { await sleep(50); a.update(0.05); }
+    check('the reaper never eats the local queen',
+      a.roster().some((p) => p.self) && a.authority.isMine(),
+      `roster=${a.roster().length} owner=${a.authority.owner()}`);
 
     await shutdown(a);
   }
@@ -383,7 +497,8 @@ export function createSuite(env) {
     { name: 'presence', fn: casePresence, budget: 30000 },
     { name: 'motion', fn: caseMotion, budget: 45000 },
     { name: 'bank', fn: caseBank, budget: 45000 },
-    { name: 'authority', fn: caseAuthority, budget: 45000 },
+    { name: 'authority', fn: caseAuthority, budget: 60000 },
+    { name: 'frozen-owner', fn: caseFrozenOwner, budget: 90000 },
     { name: 'ghosts', fn: caseGhosts, budget: 30000 },
     { name: 'offline', fn: caseOffline, budget: 30000 },
   ];

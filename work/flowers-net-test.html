@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hollowtree — shared flower reserves self test</title>
+<style>
+  html, body { background: #14100c; color: #f6e9cf; margin: 0; }
+  body { padding: 22px 26px; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h1 { font-size: 13px; letter-spacing: .18em; text-transform: uppercase; opacity: .6; margin: 0 0 14px; font-weight: 500; }
+  pre { white-space: pre-wrap; margin: 0; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<h1>Hollowtree · shared flower reserves · local driver</h1>
+<pre id="report">running…</pre>
+<script type="module">
+import * as THREE from 'three';
+import { createNet } from '../src/net/index.js';
+import { NET } from '../src/config.net.js';
+import { FLOWERS, FLOWER_SPECIES, GATHER } from '../src/config.js';
+import { createFlowers } from '../src/entities/flowers.js';
+import { createGather } from '../src/systems/gather.js';
+import { createResources } from '../src/systems/resources.js';
+
+const out = document.getElementById('report');
+const lines = [];
+let passed = 0;
+let failed = 0;
+
+function log(text) { lines.push(text); out.textContent = lines.join('\n'); }
+function check(name, ok, detail) {
+  if (ok) { passed++; log(`PASS  ${name}${detail ? `  (${detail})` : ''}`); }
+  else { failed++; log(`FAIL  ${name}${detail ? `  (${detail})` : ''}`); }
+  return ok;
+}
+const section = (title) => { log(''); log(`— ${title}`); };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const now = () => performance.now();
+
+window.addEventListener('error', (e) => { failed++; log(`FAIL  uncaught — ${e.message}`); });
+window.addEventListener('unhandledrejection', (e) => {
+  failed++;
+  const r = e.reason;
+  log(`FAIL  unhandled rejection — ${r && r.stack ? r.stack : r}`);
+});
+
+async function until(predicate, timeoutMs) {
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (predicate()) return true;
+    await sleep(20);
+  }
+  return false;
+}
+
+function wipe(code) {
+  try { localStorage.removeItem(NET.local.storagePrefix + code.toUpperCase()); } catch (error) { /* ignore */ }
+}
+
+function makeNet(code, mode, name) {
+  return createNet({ mode, code, driver: 'local', profile: { name, color: 'amber', pattern: 'banded' } });
+}
+
+// A deterministic stand-in for the real terrain: the point of the id test is that the
+// flower generator is a pure function of (seed, terrain), and the real terrain is value
+// noise off TERRAIN.seed with no Math.random in it.
+const terrain = { getHeight: (x, z) => Math.sin(x * 0.05) * Math.cos(z * 0.05) * 2 };
+const DAISY = FLOWER_SPECIES[0];
+const ORIGIN = new THREE.Vector3(0, 1, 0);
+
+function makeField() {
+  const scene = new THREE.Scene();
+  const field = createFlowers(scene, terrain);
+  return field;
+}
+
+// Pumps the field the way the render loop does, so derived reserves refresh.
+async function spin(field, ms) {
+  const deadline = now() + ms;
+  while (now() < deadline) {
+    field.update(1 / 60, ORIGIN);
+    await sleep(16);
+  }
+}
+
+// ───────────────────────────────────────────────────────────── cases
+
+// The modules the game actually loads, constructed and stepped exactly as main.js steps
+// them. A module that parses but throws on its first frame fails here, loudly.
+async function caseSmoke() {
+  section('boot smoke — the real modules construct and survive frames');
+  let field = null;
+  try {
+    field = createFlowers(new THREE.Scene(), terrain);
+  } catch (error) {
+    check('createFlowers constructs', false, String(error && error.stack ? error.stack : error));
+    return;
+  }
+  check('createFlowers constructs', Boolean(field) && field.count === FLOWERS.count, `${field.count} flowers`);
+  try {
+    // main.js calls update(dt, position, elapsed) every frame.
+    for (let k = 0; k < 5; k++) field.update(1 / 60, ORIGIN, k / 60);
+    check('flowers.update survives five frames', true, 'no throw');
+  } catch (error) {
+    check('flowers.update survives five frames', false, String(error && error.stack ? error.stack : error));
+  }
+  try {
+    const gather = createGather(field, createResources(), {
+      position: new THREE.Vector3(0, 1, 0), planarSpeed: 0, velocity: { x: 0, y: 0, z: 0 },
+    }, { entrance: new THREE.Vector3(0, 5000, 0), triggerRadius: 1 });
+    for (let k = 0; k < 5; k++) gather.update(1 / 60, { gather: true });
+    check('gather.update survives five frames', true, 'no throw');
+  } catch (error) {
+    check('gather.update survives five frames', false, String(error && error.stack ? error.stack : error));
+  }
+  field.dispose();
+}
+
+async function caseIds() {
+  section('stable ids — the generator is seed-deterministic');
+  const a = makeField();
+  const b = makeField();
+  let same = true;
+  let compared = 0;
+  for (let g = 0; g < a.flowers.length && same; g++) {
+    const ma = a.flowers[g].matrix;
+    const mb = b.flowers[g].matrix;
+    if (ma.length !== mb.length || a.flowers[g].count !== b.flowers[g].count) { same = false; break; }
+    for (let k = 0; k < ma.length; k++) {
+      compared++;
+      if (Math.abs(ma[k] - mb[k]) > 1e-9) { same = false; break; }
+    }
+  }
+  check('two independent fields place every instance identically', same,
+    `${compared} matrix floats over ${a.count} flowers, ids f0…f${a.count - 1}`);
+  check('ids are index-keyed', a.idOf(0) === 'f0' && a.idOf(a.count - 1) === `f${a.count - 1}`,
+    `${a.idOf(0)} … ${a.idOf(a.count - 1)}`);
+  a.dispose();
+  b.dispose();
+}
+
+async function caseShared() {
+  section('a drained flower reads the same on both clients');
+  const CODE = 'HTFLOWSHARE';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  const nb = makeNet(CODE, 'join', 'Ryszard');
+  await na.ready;
+  await nb.ready;
+  const fa = makeField();
+  const fb = makeField();
+  fa.attachNet(na);
+  fb.attachNet(nb);
+
+  check('an untouched meadow reads full, not empty',
+    Math.abs(fa.reserveOf(0) - DAISY.reserve) < 1e-4 && Math.abs(fb.reserveOf(0) - DAISY.reserve) < 1e-4,
+    `f0 = ${fa.reserveOf(0).toFixed(3)} / ${fb.reserveOf(0).toFixed(3)} of ${DAISY.reserve}`);
+
+  let scoop = null;
+  fa.drain(0, 2.5, (s) => { scoop = s; });
+  const credited = await until(() => scoop !== null, 4000);
+  check('the transaction credits what it actually took', credited && Math.abs(scoop.taken - 2.5) < 1e-6,
+    scoop ? `took ${scoop.taken.toFixed(3)} of 2.5 asked` : 'no callback');
+
+  await spin(fa, 600);
+  await spin(fb, 600);
+  const expect = DAISY.reserve - 2.5;
+  check('the draining client sees the reduced reserve', Math.abs(fa.reserveOf(0) - expect) < 0.08,
+    `${fa.reserveOf(0).toFixed(3)} vs ${expect.toFixed(3)}`);
+  check('the other client sees the same reduced reserve', Math.abs(fb.reserveOf(0) - expect) < 0.08,
+    `${fb.reserveOf(0).toFixed(3)} vs ${expect.toFixed(3)}`);
+
+  fa.dispose(); fb.dispose(); na.dispose(); nb.dispose();
+  await sleep(200);
+}
+
+async function caseContention() {
+  section('two queens on one bloom in the same tick');
+  const CODE = 'HTFLOWRACE';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  const nb = makeNet(CODE, 'join', 'Ryszard');
+  await na.ready;
+  await nb.ready;
+  const spec = { max: DAISY.reserve, regrowth: DAISY.regrowth, regrowDelay: DAISY.regrowDelay };
+
+  const [ta, tb] = await Promise.all([
+    na.flowers.drain('f1', 5, spec),
+    nb.flowers.drain('f1', 5, spec),
+  ]);
+  const sum = ta + tb;
+  check('the two takes never sum to more than the reserve', sum <= DAISY.reserve + 1e-6,
+    `${ta.toFixed(3)} + ${tb.toFixed(3)} = ${sum.toFixed(3)} of ${DAISY.reserve} (10 asked)`);
+  check('both takes are non-negative and something was taken', ta >= 0 && tb >= 0 && sum > 0,
+    `${ta.toFixed(3)} / ${tb.toFixed(3)}`);
+
+  const left = await na.world.get('flowers/f1');
+  const remaining = left ? Number(left.a) : NaN;
+  check('what is left matches what was taken', Math.abs(remaining - (DAISY.reserve - sum)) < 1e-3,
+    `stored ${remaining.toFixed(3)}, expected ${(DAISY.reserve - sum).toFixed(3)}`);
+
+  na.dispose(); nb.dispose();
+  await sleep(200);
+}
+
+async function caseRegrowth() {
+  section('a flower left alone regrows exactly per regrowth / regrowDelay');
+  const CODE = 'HTFLOWGROW';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  const nb = makeNet(CODE, 'join', 'Ryszard');
+  await na.ready;
+  await nb.ready;
+  const spec = { max: DAISY.reserve, regrowth: DAISY.regrowth, regrowDelay: DAISY.regrowDelay };
+
+  const taken = await na.flowers.drain('f2', 4, spec);
+  const stored = DAISY.reserve - taken;
+  const t0 = now();
+  await until(() => nb.flowers.amount('f2', spec) < DAISY.reserve - 1e-6, 3000);
+
+  await sleep(Math.max(0, 2000 - (now() - t0)));
+  const during = nb.flowers.amount('f2', spec);
+  check('nothing regrows inside regrowDelay', Math.abs(during - stored) < 0.02,
+    `${during.toFixed(3)} at ~2.0 s, delay is ${DAISY.regrowDelay} s`);
+
+  await sleep(Math.max(0, 7000 - (now() - t0)));
+  const elapsed = (now() - t0) / 1000;
+  const after = nb.flowers.amount('f2', spec);
+  const expect = Math.min(DAISY.reserve, stored + Math.max(0, elapsed - DAISY.regrowDelay) * DAISY.regrowth);
+  check('regrowth matches the rate exactly, with no client ticking it',
+    Math.abs(after - expect) < 0.06,
+    `${after.toFixed(3)} vs ${expect.toFixed(3)} after ${elapsed.toFixed(2)} s (+${DAISY.regrowth}/s past ${DAISY.regrowDelay} s)`);
+
+  na.dispose(); nb.dispose();
+  await sleep(200);
+}
+
+async function caseUntouchedFull() {
+  section('a never-drained flower reads full');
+  const CODE = 'HTFLOWFULL';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  await na.ready;
+  const fa = makeField();
+  fa.attachNet(na);
+  await spin(fa, 300);
+  // Full means "equal to some species' maximum" — reading a fresh meadow as empty was a
+  // real bug, and reading it as merely non-zero would not have caught it.
+  const maxima = FLOWER_SPECIES.map((s) => s.reserve);
+  let full = 0;
+  let notFull = 0;
+  for (let i = 0; i < fa.count; i++) {
+    const v = fa.reserveOf(i);
+    if (maxima.some((m) => Math.abs(v - m) < 1e-4)) full++;
+    else notFull++;
+  }
+  check('every flower in a fresh meadow reads at its species maximum', notFull === 0,
+    `${full} full, ${notFull} short of ${fa.count}, maxima ${maxima.join('/')}`);
+  const spec = { max: DAISY.reserve, regrowth: DAISY.regrowth, regrowDelay: DAISY.regrowDelay };
+  check('net reports max for an id that was never written',
+    na.flowers.amount('f999', spec) === DAISY.reserve, `${na.flowers.amount('f999', spec)} of ${DAISY.reserve}`);
+  check('nothing is tracked as depleted in a fresh meadow', fa.trackedCount() === 0, `${fa.trackedCount()} tracked`);
+  fa.dispose(); na.dispose();
+  await sleep(200);
+}
+
+async function caseRemoteVisible() {
+  section('a remote drain repaints the instance, without a rebuild');
+  const CODE = 'HTFLOWSEEN';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  const nb = makeNet(CODE, 'join', 'Ryszard');
+  await na.ready;
+  await nb.ready;
+  const fa = makeField();
+  fa.attachNet(na);
+  const group = fa.flowers[0];
+  const geometryBefore = group.mesh.geometry;
+  const colorBefore = group.color.slice();
+  const spec = { max: DAISY.reserve, regrowth: DAISY.regrowth, regrowDelay: DAISY.regrowDelay };
+
+  await nb.flowers.drain('f3', DAISY.reserve, spec);
+  const seen = await until(() => { fa.update(1 / 60, ORIGIN); return fa.reserveOf(3) < DAISY.reserve * 0.5; }, 4000);
+  check('the remote drain reaches this client', seen, `f3 = ${fa.reserveOf(3).toFixed(3)}`);
+
+  let changed = 0;
+  for (let k = 0; k < group.color.length; k += 3) {
+    if (Math.abs(group.color[k] - colorBefore[k]) > 1e-4
+      || Math.abs(group.color[k + 1] - colorBefore[k + 1]) > 1e-4
+      || Math.abs(group.color[k + 2] - colorBefore[k + 2]) > 1e-4) changed++;
+  }
+  check('exactly one instance was repainted', changed === 1, `${changed} of ${group.count} instances`);
+  check('no geometry or buffer rebuild',
+    group.mesh.geometry === geometryBefore && group.mesh.instanceColor.array === group.color,
+    'same geometry and same instanceColor buffer');
+
+  fa.dispose(); nb.dispose(); na.dispose();
+  await sleep(200);
+}
+
+async function caseSolo() {
+  section('solo without a net handle still gathers and depletes');
+  const field = makeField();
+  check('no net attached', field.netAttached === false, `netAttached=${field.netAttached}`);
+
+  const probe = field.sampleNearest(new THREE.Vector3(0, 0, 0), 200);
+  const idx = probe ? probe.index : -1;
+  const at = probe ? probe.position.clone() : new THREE.Vector3();
+  const before = idx >= 0 ? field.reserveOf(idx) : 0;
+  const scoop = field.drain(idx, 1.0);
+  check('drain returns synchronously offline, exactly as before',
+    Boolean(scoop) && scoop.taken > 0 && field.reserveOf(idx) < before,
+    scoop ? `took ${scoop.taken.toFixed(3)}, ${before.toFixed(3)} → ${field.reserveOf(idx).toFixed(3)}` : 'null');
+
+  // dt no longer drives regrowth: ten simulated seconds inside regrowDelay must add nothing.
+  const held = field.reserveOf(idx);
+  for (let k = 0; k < 10; k++) field.update(1.0, ORIGIN);
+  check('regrowth is derived, not accumulated from dt',
+    Math.abs(field.reserveOf(idx) - held) < 1e-4,
+    `${held.toFixed(4)} → ${field.reserveOf(idx).toFixed(4)} after 10 s of dt in <1 s of wall clock`);
+
+  const resources = createResources();
+  const flight = { position: at, planarSpeed: 0, velocity: { x: 0, y: 0, z: 0 } };
+  const hive = { entrance: new THREE.Vector3(0, 5000, 0), triggerRadius: 1 };
+  const gather = createGather(field, resources, flight, hive);
+  const startReserve = field.reserveOf(idx);
+  for (let k = 0; k < 120; k++) gather.update(1 / 60, { gather: true });
+  const load = gather.state.load;
+  check('the queen fills her baskets offline', load > 0.1, `load ${load.toFixed(3)} after 2 s of holding`);
+  check('the flower she held is measurably lighter', field.reserveOf(idx) < startReserve - 0.1,
+    `${startReserve.toFixed(3)} → ${field.reserveOf(idx).toFixed(3)}`);
+  field.dispose();
+}
+
+async function caseGatherOnline() {
+  section('gathering online credits only what the transaction granted');
+  const CODE = 'HTFLOWGATH';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  await na.ready;
+  const field = makeField();
+  field.attachNet(na);
+
+  // sampleNearest reuses one handle object, so anything needed later is copied out now.
+  const probe = field.sampleNearest(new THREE.Vector3(0, 0, 0), 200);
+  const idx = probe.index;
+  const idxMax = probe.reserveMax;
+  const resources = createResources();
+  const flight = { position: probe.position.clone(), planarSpeed: 0, velocity: { x: 0, y: 0, z: 0 } };
+  const hive = { entrance: new THREE.Vector3(0, 5000, 0), triggerRadius: 1 };
+  const gather = createGather(field, resources, flight, hive);
+
+  const deadline = now() + 3000;
+  while (now() < deadline && gather.state.load < 0.5) {
+    gather.update(1 / 60, { gather: true });
+    field.update(1 / 60, flight.position);
+    await sleep(16);
+  }
+  check('baskets fill from the shared reserve', gather.state.load > 0.1, `load ${gather.state.load.toFixed(3)}`);
+  check('the shared flower dropped by roughly what was credited',
+    field.reserveOf(idx) < idxMax - 0.1,
+    `${idxMax.toFixed(2)} → ${field.reserveOf(idx).toFixed(3)}`);
+
+  const stats = na.stats();
+  check('gathering did not flood the transport', !stats || stats.messagesSent < 400,
+    stats ? `${stats.messagesSent} messages for ${gather.state.load.toFixed(2)} of load` : 'no stats');
+
+  field.dispose(); na.dispose();
+  await sleep(200);
+}
+
+async function caseCost() {
+  section('per-frame cost of the new read path');
+  const solo = makeField();
+  let t = now();
+  for (let k = 0; k < 240; k++) solo.update(1 / 60, ORIGIN);
+  const soloMs = (now() - t) / 240;
+  check('offline update stays cheap with every flower tracked', soloMs < 1.2,
+    `${soloMs.toFixed(3)} ms/frame, ${solo.trackedCount()} tracked of ${solo.count}`);
+  solo.dispose();
+
+  const CODE = 'HTFLOWCOST';
+  wipe(CODE);
+  const na = makeNet(CODE, 'host', 'Jurek');
+  await na.ready;
+  const field = makeField();
+  field.attachNet(na);
+  const spec = { max: DAISY.reserve, regrowth: DAISY.regrowth, regrowDelay: DAISY.regrowDelay };
+  const jobs = [];
+  for (let i = 0; i < 60; i++) jobs.push(na.flowers.drain(`f${i}`, 3, spec));
+  await Promise.all(jobs);
+  await until(() => { field.update(1 / 60, ORIGIN); return field.trackedCount() >= 60; }, 6000);
+
+  t = now();
+  for (let k = 0; k < 240; k++) field.update(1 / 60, ORIGIN);
+  const netMs = (now() - t) / 240;
+  check('net-backed update stays cheap', netMs < 1.2,
+    `${netMs.toFixed(3)} ms/frame, ${field.trackedCount()} depleted flowers tracked of ${field.count}`);
+
+  field.dispose(); na.dispose();
+  await sleep(200);
+}
+
+const cases = [
+  { name: 'boot smoke', fn: caseSmoke, budget: 15000 },
+  { name: 'stable ids', fn: caseIds, budget: 15000 },
+  { name: 'shared depletion', fn: caseShared, budget: 20000 },
+  { name: 'contention', fn: caseContention, budget: 20000 },
+  { name: 'regrowth', fn: caseRegrowth, budget: 25000 },
+  { name: 'untouched reads full', fn: caseUntouchedFull, budget: 20000 },
+  { name: 'remote drain visible', fn: caseRemoteVisible, budget: 20000 },
+  { name: 'solo without net', fn: caseSolo, budget: 20000 },
+  { name: 'gathering online', fn: caseGatherOnline, budget: 20000 },
+  { name: 'per-frame cost', fn: caseCost, budget: 30000 },
+];
+
+// No case may stall the page: each races its own budget and reports FAIL instead of hanging.
+async function runCase(entry) {
+  let timer = 0;
+  const guard = new Promise((resolve) => { timer = setTimeout(() => resolve('__timeout__'), entry.budget); });
+  try {
+    const result = await Promise.race([entry.fn().then(() => '__done__'), guard]);
+    if (result === '__timeout__') {
+      failed++;
+      log(`FAIL  ${entry.name} timed out after ${(entry.budget / 1000).toFixed(0)} s — the rest of this case did not run`);
+    }
+  } catch (error) {
+    failed++;
+    log(`FAIL  ${entry.name} threw — ${error && error.stack ? error.stack : error}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+(async () => {
+  const started = now();
+  log(`INFO  ${FLOWERS.count} flowers · local driver · ${NET.local.latencyMs}±${NET.local.latencyJitterMs} ms simulated latency`);
+  for (const entry of cases) await runCase(entry);
+  log('');
+  log(`${passed} passed, ${failed} failed in ${((now() - started) / 1000).toFixed(1)} s`);
+  log(failed ? 'RESULT FAIL' : 'RESULT PASS');
+  window.__flowerTest = { passed, failed, report: lines.join('\n') };
+})();
+</script>
+</body>
+</html>

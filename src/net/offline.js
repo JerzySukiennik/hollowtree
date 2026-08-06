@@ -35,6 +35,29 @@ export function computeOfflineGrant(options) {
   return { seconds, rawSeconds: raw, capped: raw > capSeconds, grants, total };
 }
 
+// A flower's reserve is stored as the amount it had when it was last drained, plus
+// the server timestamp of that drain. Every client derives the current amount from
+// those two numbers, so regrowth costs no bandwidth at all, every client agrees
+// without syncing, and the meadow refills while nobody is playing — which is the
+// whole point of "the world advances while nobody plays".
+export function regrownAmount(options) {
+  const opts = options || {};
+  const max = Number(opts.max) || 0;
+  const stored = Math.max(0, Math.min(max, Number(opts.stored) || 0));
+  const drainedAt = Number(opts.drainedAt) || 0;
+  const now = Number(opts.now) || 0;
+  const ratePerSec = Number(opts.ratePerSec) || 0;
+  const delaySec = Number(opts.delaySec) || 0;
+
+  // No drain has ever been recorded, so nobody has touched this flower: it is full.
+  // Reading it as empty would start every meadow stripped bare.
+  if (!drainedAt) return max;
+  if (stored >= max || ratePerSec <= 0) return stored;
+  const elapsed = (now - drainedAt) / 1000 - delaySec;
+  if (!(elapsed > 0)) return stored;
+  return Math.min(max, stored + elapsed * ratePerSec);
+}
+
 // The season clock derives purely from the server epoch, so the world keeps turning
 // while nobody is connected.
 export function seasonAt(nowMs, epochMs) {

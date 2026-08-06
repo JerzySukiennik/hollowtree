@@ -126,15 +126,35 @@ export async function createFirebaseDriver(options) {
       await remove(node(path));
     },
 
+    // The SDK retries internally and gives up with a "maxretry" error under sustained
+    // contention. Left alone, that surfaces as a rejected promise and a silently lost
+    // deposit, and NET.bank.transactionRetries would mean nothing on the path that
+    // actually ships. So the bound is enforced here too: catch the give-up, back off,
+    // and try again, counting the retries the same way the local driver does.
     async transact(path, fn) {
-      const result = await runTransaction(node(path), (current) => fn(clone(current)), {
-        applyLocally: false,
-      });
-      countSent(result && result.snapshot ? result.snapshot.val() : null);
-      return {
-        committed: Boolean(result && result.committed),
-        value: result && result.snapshot ? result.snapshot.val() : null,
-      };
+      let lastError = null;
+      for (let attempt = 0; attempt < NET.bank.transactionRetries; attempt++) {
+        try {
+          const result = await runTransaction(node(path), (current) => fn(clone(current)), {
+            applyLocally: false,
+          });
+          countSent(result && result.snapshot ? result.snapshot.val() : null);
+          return {
+            committed: Boolean(result && result.committed),
+            value: result && result.snapshot ? result.snapshot.val() : null,
+            attempts: attempt + 1,
+          };
+        } catch (error) {
+          const message = (error && error.message) || '';
+          if (!/maxretry|too many retries|disconnect/i.test(message)) throw error;
+          lastError = error;
+          stats.transactionRetries++;
+          const backoff = Math.min(NET.bank.retryBackoffMaxMs, NET.bank.retryBackoffMs * Math.pow(1.6, attempt));
+          await new Promise((resolve) => setTimeout(resolve, backoff * (0.5 + Math.random())));
+        }
+      }
+      console.warn('[net] transaction gave up after', NET.bank.transactionRetries, 'attempts on', path, lastError && lastError.message);
+      return { committed: false, value: null, exhausted: true };
     },
 
     subscribe(path, cb) {

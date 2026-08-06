@@ -1,7 +1,7 @@
 // Hollowtree — pure-logic checks for the net layer: wire packing, interpolation and offline accrual. Run: node work/net-logic.test.mjs
 
 import { createInterpolator, slerp } from '../src/net/interpolation.js';
-import { computeOfflineGrant, seasonAt } from '../src/net/offline.js';
+import { computeOfflineGrant, regrownAmount, seasonAt } from '../src/net/offline.js';
 import { packMotion, unpackMotion, pathsOverlap, sameSwarm, sanitizeSwarm } from '../src/net/util.js';
 import { NET } from '../src/config.net.js';
 
@@ -185,6 +185,30 @@ check('sameSwarm compares composition', sameSwarm({ a: 1, b: 2 }, { b: 2, a: 1 }
   const capHours = NET.bank.capHours;
   const rateFrac = NET.bank.offlineRate;
   check('offline constants match the spec', capHours === 8 && rateFrac === 0.25, `cap ${capHours} h at ${rateFrac * 100} %`);
+}
+
+// ---------------------------------------------------------------- flower regrowth
+
+{
+  const now = 1_700_000_000_000;
+  const spec = { max: 100, ratePerSec: 5, delaySec: 10 };
+
+  check('an untouched flower reads full',
+    regrownAmount({ stored: 0, drainedAt: 0, now, ...spec }) === 100);
+  check('regrowth waits out the delay',
+    regrownAmount({ stored: 20, drainedAt: now - 8000, now, ...spec }) === 20,
+    'drained 8 s ago, delay is 10 s');
+  check('regrowth accrues after the delay',
+    Math.abs(regrownAmount({ stored: 20, drainedAt: now - 14000, now, ...spec }) - 40) < 1e-9,
+    '4 s of growth at 5/s on top of 20');
+  check('regrowth never exceeds the reserve',
+    regrownAmount({ stored: 20, drainedAt: now - 3600_000, now, ...spec }) === 100,
+    'an hour away still caps at max');
+  check('a flower regrows while nobody plays',
+    regrownAmount({ stored: 0, drainedAt: now - 86_400_000, now, ...spec }) === 100,
+    'a full day of absence refills it, with zero bandwidth');
+  check('a clock running backwards cannot grow a flower',
+    regrownAmount({ stored: 20, drainedAt: now + 60_000, now, ...spec }) === 20);
 }
 
 // ---------------------------------------------------------------- season clock

@@ -15,8 +15,6 @@ ENT_DEPTH    = 1.9      # wall thickness at the entrance == length of the shaft 
 NSIDE        = 21       # 7 bark plates x 3 facets each
 VOID_Z0      = 10.5     # floor of the inner shaft
 VOID_Z1      = 41.0     # where the shaft closes off
-GASH_ANG     = 5.62     # tall rift that shows the trunk is hollow
-GASH_Z       = 29.0
 
 PAL = {
     'bark':   0x6b503a,
@@ -904,15 +902,18 @@ def build():
     apply_bool(trunk, build_void_object(grow=0.07, name='void2'), 'rehollow')
 
     # 4) drive the entrance shaft through the wall into the void
+    # A round aperture, not the old 0.97 x 1.14 ellipse: it matches the specified
+    # r=3.2 mouth, and it keeps the top of the opening below y=20 so the only thing
+    # a camera can see of the interior shell is the entrance itself.
     ENT_ARGS = dict(ang=-math.pi / 2, z_c=ENT_Z, s_out=r_out_ent + 14.0, s_in=v_ent - 2.2,
-                    rx=ENT_R * 0.97, rz=ENT_R * 1.14)
+                    rx=ENT_R * 1.02, rz=ENT_R * 1.02)
     apply_bool(trunk, make_slot('entrance_cut', flare=1.17, sides=18, seed=404, **ENT_ARGS), 'shaft')
 
-    # 4) tall rift higher up so the trunk reads hollow from outside
-    v_gash = void_radius(GASH_ANG, GASH_Z)
-    GASH_ARGS = dict(ang=GASH_ANG, z_c=GASH_Z, s_out=r_smooth(GASH_ANG, GASH_Z) + 5.0,
-                     s_in=v_gash - 1.2, rx=0.92, rz=4.3)
-    apply_bool(trunk, make_slot('gash_cut', flare=1.10, sides=14, seed=77, **GASH_ARGS), 'gash')
+    # The tall rift that used to sit at z 24.7..33.3 is gone. It was meant to read
+    # as a bark split showing the trunk is hollow, but it broke clean through to the
+    # inner shell, so from the front and the side it was the first surface hit over a
+    # 10-unit run and rendered as a pure-black gash -- a second, unauthored hole
+    # above the real entrance. The entrance is now the only aperture in the bole.
 
     # kill zero-area faces, then triangulate: a non-planar quad exports one
     # polygon normal for two triangles, which can oppose the winding of one
@@ -952,7 +953,7 @@ def build():
         ang = math.atan2(c.y - cy, c.x - cx)
         is_inner = (VOID_Z0 - 1.5 <= c.z <= VOID_Z1 + 2.5
                     and rc < r_smooth(ang, c.z) - wall(ang, c.z) * 0.45)
-        if is_inner or in_slot(c, **ENT_ARGS) or in_slot(c, **GASH_ARGS):
+        if is_inner or in_slot(c, **ENT_ARGS):
             inside.add(p.index)
             p.material_index = 1
     print('interior faces:', len(inside))
@@ -1048,7 +1049,7 @@ def place_entrance_empty(trunk, ent, interior):
     tunnel wall and the outer bark. That is literally the mouth surface."""
     hx, hy = centre(ENT_Z)
     hits = []
-    for f in (1.15, 1.30):
+    for f in (1.15, 1.24):
         for i in range(36):
             a = 2 * math.pi * i / 36
             px = hx + math.cos(a) * ENT_R * f

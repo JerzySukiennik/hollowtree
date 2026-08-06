@@ -58,6 +58,23 @@ export function createGather(flowers, resources, flight, hive) {
     return event;
   }
 
+  // A granted scoop, possibly arriving a network round trip after it was asked for.
+  // Room is measured at credit time, not at request time.
+  function credit(scoop) {
+    if (!scoop) return;
+    const room = Math.max(0, GATHER.basketCapacity - totalLoad());
+    if (room <= 0) return;
+    let gained = 0;
+    for (const kind of kinds) gained += scoop[kind] || 0;
+    if (gained <= 0) return;
+    const k = gained > room ? room / gained : 1;
+    for (const kind of kinds) baskets[kind] = (baskets[kind] || 0) + (scoop[kind] || 0) * k;
+    const next = totalLoad();
+    state.load = next;
+    state.fill = Math.min(1, next / GATHER.basketCapacity);
+    state.full = next >= GATHER.basketCapacity - 1e-4;
+  }
+
   function update(dt, input) {
     if (!(dt > 0)) return state;
     if (cooldown > 0) cooldown = Math.max(0, cooldown - dt);
@@ -114,19 +131,12 @@ export function createGather(flowers, resources, flight, hive) {
     state.active = steady && state.charge > 0;
 
     if (state.active && near) {
-      const room = Math.max(0, GATHER.basketCapacity - load);
       const wanted = GATHER.rate * state.charge * dt;
-      const scoop = flowers.drain ? flowers.drain(near, wanted) : null;
-      if (scoop) {
-        let gained = 0;
-        for (const kind of kinds) gained += scoop[kind] || 0;
-        const k = gained > room && gained > 0 ? room / gained : 1;
-        for (const kind of kinds) baskets[kind] = (baskets[kind] || 0) + (scoop[kind] || 0) * k;
-        const next = totalLoad();
-        state.load = next;
-        state.fill = Math.min(1, next / GATHER.basketCapacity);
-        state.full = next >= GATHER.basketCapacity - 1e-4;
-      }
+      // Ask; credit only what comes back. Offline the callback fires in this same
+      // statement, online it fires when the shared transaction resolves — either way
+      // the baskets are filled from what the flower actually gave up, never from what
+      // was requested, so two queens on one bloom cannot both scoop it dry.
+      if (flowers.drain) flowers.drain(near, wanted, credit);
     }
 
     if (state.full && state.nearHive) state.hint = 'deposit';

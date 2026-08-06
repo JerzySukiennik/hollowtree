@@ -309,6 +309,7 @@ async function boot() {
   let net = null;
   let netInfo = null;
   let bankSnapshot = null;
+  let season = null;
   const remotes = new Map();
   let menuAngle = MENU.backdrop.startAngle;
 
@@ -373,6 +374,19 @@ async function boot() {
         if (visual && visual.object3D) scene.remove(visual.object3D);
         remotes.delete(peer.uid);
       });
+      if (weather && net.weather && typeof net.weather.subscribe === 'function') {
+        net.weather.subscribe((entry) => {
+          if (entry) weather.setFromWorld(entry);
+        });
+        // The weather chain is infinite and deterministic from one (seed, startedAt),
+        // so the owner seeds it once and every client derives the same storms from it.
+        if (!net.weather.current() && net.authority && net.authority.isMine()) {
+          let seed = 0;
+          const code = (netInfo && netInfo.code) || '';
+          for (let i = 0; i < code.length; i++) seed = (seed * 31 + code.charCodeAt(i)) >>> 0;
+          net.weather.set({ kind: 'clear', intensity: 0.4, seed: seed || 1, durationMs: 600000 });
+        }
+      }
       if (gather && net.bank) {
         gather.onDeposit((event) => {
           const applied = (event && event.applied) || {};
@@ -466,6 +480,10 @@ async function boot() {
     if (hive && typeof hive.update === 'function') hive.update(dt, elapsed);
     if (net) {
       net.update(dt);
+      if (net.world && typeof net.world.seasonPhase === 'function') {
+        season = net.world.seasonPhase();
+        if (window.hollowtree) window.hollowtree.season = season.name;
+      }
       for (const [uid, visual] of remotes) {
         const peer = net.peers.get(uid);
         if (!peer || !peer.hasMotion || !visual) continue;
@@ -489,7 +507,7 @@ async function boot() {
       insideness: portal ? portal.state.insideness : 0,
       speed: typeof flight.speed === 'number' ? flight.speed : flight.velocity.length(),
       swarmSize: 0,
-      season: (window.hollowtree && window.hollowtree.season) || 'summer',
+      season: (season && season.name) || 'summer',
       timeOfDay: sky && typeof sky.timeOfDay === 'number' ? sky.timeOfDay : 0.5,
       position: flight.position,
       gathering: gather ? gather.state.charge : 0,

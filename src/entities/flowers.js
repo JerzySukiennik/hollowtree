@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FLOWERS, FLOWER_SPECIES, HIVE } from '../config.js';
+import { regrownAmount } from '../net/offline.js';
 
 const loader = new GLTFLoader();
 
@@ -247,10 +248,55 @@ export function createFlowers(scene, terrain) {
   const reserveMax = new Float32Array(total);
   const depletion = new Float32Array(total);
   const shown = new Float32Array(total);
-  const idleTimer = new Float32Array(total);
   const local = new Uint16Array(total);
 
+  // Reserves are never accumulated with `+= regrowth * dt`. They are *derived* from
+  // (amount at last drain, timestamp of that drain) — the same formula the net layer
+  // uses — so a flower regrows while nobody is looking at it, and while nobody is
+  // playing at all. Offline, the clock is this machine's; online, it is the server's.
+  const storedAmt = new Float32Array(total);
+  const drainedAt = new Float64Array(total);
+
+  // Net-backed drains are transactional and therefore asynchronous. One request may be
+  // in flight per flower; anything asked for meanwhile piles up in pendingWant and goes
+  // out as a single follow-up, so holding to gather never floods the transport.
+  const pendingWant = new Float32Array(total);
+  const inFlight = new Uint8Array(total);
+  const pendingCb = new Array(total).fill(null);
+  // Bumped every time the shared entry for a flower echoes back, so a resolving drain
+  // can tell whether the authoritative value already overtook its own estimate.
+  const echoSeq = new Uint32Array(total);
+
+  // The shared entry as last broadcast: { a, d }. Keeping it here rather than asking the
+  // net layer per flower per frame matters — net.flowers.amount() reads the driver clock,
+  // and on the local driver that parses the whole store. The subscription hands us the
+  // same two numbers for free, so the refresh becomes pure arithmetic.
+  const netStored = new Float32Array(total);
+  const netDrainedAt = new Float64Array(total);
+  const hasEntry = new Uint8Array(total);
+
+  // Stable ids: flowers are generated from FLOWERS.seed over deterministic terrain
+  // (TERRAIN.seed, value noise — no Math.random anywhere in either), so instance i is
+  // the same bloom in the same spot on every client. `f<i>` is therefore a safe key.
+  const ids = new Array(total);
+  const specs = [];
+  for (let s = 0; s < table.length; s++) {
+    specs.push({ max: table[s].reserve, regrowth: table[s].regrowth, regrowDelay: table[s].regrowDelay });
+  }
+
+  // Only flowers that are not full need watching. The list is a swap-remove array, not
+  // a Set, so the per-frame refresh iterates without allocating an iterator.
+  const trackedList = new Int32Array(total);
+  const trackedSlot = new Int32Array(total).fill(-1);
+  let trackedCount = 0;
+
+  let net = null;
+  let unsubscribeNet = null;
+  const NET_ECHO_GRACE_MS = 1500;
+  const FULL_EPS = 1e-4;
+
   const counts = new Uint16Array(table.length);
+  const bornAt = Date.now();
   const hiveClearSq = FLOWERS.hiveClearRadius * FLOWERS.hiveClearRadius;
   const clearSq = FLOWERS.clearRadius * FLOWERS.clearRadius;
 
@@ -291,7 +337,10 @@ export function createFlowers(scene, terrain) {
     tint[i] = 1 + (rand() - 0.5) * 2 * FLOWERS.tintVariance;
     cutoff[i] = FLOWERS.cullDistance * (1 - FLOWERS.cullJitter * rand());
     reserveMax[i] = table[s].reserve;
+    ids[i] = `f${i}`;
     reserve[i] = table[s].reserve * (0.72 + rand() * 0.28);
+    storedAmt[i] = reserve[i];
+    drainedAt[i] = bornAt;
     depletion[i] = 1 - reserve[i] / reserveMax[i];
     shown[i] = -1;
     local[i] = counts[s];
@@ -407,6 +456,103 @@ export function createFlowers(scene, terrain) {
   let cursor = 0;
   const last = new THREE.Vector3();
 
+  // One reused options object: the derived read runs over every non-full flower each
+  // frame and must not allocate.
+  const rgo = { stored: 0, drainedAt: 0, now: 0, max: 0, ratePerSec: 0, delaySec: 0 };
+
+  // The world clock, sampled at most once every 30 ms: on the local driver each call
+  // parses the backing store, and the refresh must not pay that per flower.
+  let serverClock = 0;
+  let serverClockAt = 0;
+  function serverNow() {
+    const wall = Date.now();
+    if (wall - serverClockAt > 30) {
+      serverClock = net && net.world && typeof net.world.now === 'function' ? net.world.now() : wall;
+      serverClockAt = wall;
+    }
+    return serverClock;
+  }
+
+  function derive(i, stored, at, nowMs) {
+    const spec = specs[speciesOf[i]];
+    rgo.stored = stored;
+    rgo.drainedAt = at;
+    rgo.now = nowMs;
+    rgo.max = spec.max;
+    rgo.ratePerSec = spec.regrowth;
+    rgo.delaySec = spec.regrowDelay;
+    return regrownAmount(rgo);
+  }
+
+  function localAmount(i) {
+    return derive(i, storedAmt[i], drainedAt[i], Date.now());
+  }
+
+  // The single read path: the shared world when we are connected to one, this machine's
+  // own derived value when we are not. Solo without a net handle behaves as it always did.
+  // A flower with no shared entry has never been drained by anyone — it is full.
+  function amountOf(i, nowMs) {
+    if (!net) return localAmount(i);
+    if (!hasEntry[i]) return reserveMax[i];
+    return derive(i, netStored[i], netDrainedAt[i], nowMs || serverNow());
+  }
+
+  function track(i) {
+    if (trackedSlot[i] >= 0) return;
+    trackedSlot[i] = trackedCount;
+    trackedList[trackedCount++] = i;
+  }
+
+  function untrack(i) {
+    const slot = trackedSlot[i];
+    if (slot < 0) return;
+    trackedCount--;
+    const moved = trackedList[trackedCount];
+    trackedList[slot] = moved;
+    trackedSlot[moved] = slot;
+    trackedSlot[i] = -1;
+  }
+
+  function applyAmount(i, value) {
+    const max = reserveMax[i];
+    const v = value < 0 ? 0 : (value > max ? max : value);
+    if (reserve[i] === v) return false;
+    reserve[i] = v;
+    depletion[i] = 1 - v / max;
+    if (Math.abs(depletion[i] - shown[i]) > 0.01 || v >= max - FULL_EPS || v <= FLOWERS.reserveEpsilon) {
+      shown[i] = depletion[i];
+      writeColor(i);
+      // Wilt is in the instance matrix too (curl and droop), so a bloom stripped by
+      // another queen visibly collapses — one instance rewritten, never a rebuild.
+      writeMatrix(i, last.x, last.z);
+      groups[speciesOf[i]].mesh.instanceMatrix.needsUpdate = true;
+    }
+    return true;
+  }
+
+  function makeScoop(i, taken) {
+    const species = table[speciesOf[i]];
+    const share = taken / reserveMax[i];
+    return {
+      taken,
+      pollen: species.pollen * share,
+      nectar: species.nectar * share,
+      resin: 0,
+      speciesId: species.id,
+      index: i,
+    };
+  }
+
+  function indexOfId(id) {
+    if (typeof id !== 'string' || id.charCodeAt(0) !== 102) return -1;
+    const i = Number(id.slice(1));
+    return Number.isInteger(i) && i >= 0 && i < total ? i : -1;
+  }
+
+  for (let i = 0; i < total; i++) {
+    if (reserve[i] < reserveMax[i] - FULL_EPS) track(i);
+  }
+
   function headY(i) {
     return fy[i] + headOf[speciesOf[i]] * scale[i] * (1 - depletion[i] * FLOWERS.curlDroop);
   }
@@ -454,27 +600,97 @@ export function createFlowers(scene, terrain) {
     return fillHandle(best, Math.sqrt(bestSq));
   }
 
-  function drain(target, amount) {
+  // Sends the accumulated want for one flower as a single transaction and credits the
+  // caller with what the transaction ACTUALLY returned — two queens on the same bloom
+  // in the same tick split what is there, they do not each get a full basket.
+  function pump(i) {
+    if (!net || inFlight[i] || !(pendingWant[i] > 0)) return;
+    const want = pendingWant[i];
+    pendingWant[i] = 0;
+    inFlight[i] = 1;
+    net.flowers.drain(ids[i], want, specs[speciesOf[i]]).then((taken) => {
+      inFlight[i] = 0;
+      if (taken > 0) {
+        // Our own write comes back through subscribe a moment later; until it does,
+        // this number is the freshest truth we have about the flower.
+        echoUntil[i] = Date.now() + NET_ECHO_GRACE_MS;
+        applyAmount(i, reserve[i] - taken);
+        const cb = pendingCb[i];
+        if (cb) cb(makeScoop(i, taken));
+      } else {
+        echoUntil[i] = 0;
+      }
+      if (pendingWant[i] > 0) pump(i);
+    }, () => {
+      inFlight[i] = 0;
+      pendingWant[i] = 0;
+      echoUntil[i] = 0;
+    });
+  }
+
+  // onTaken is called with the scoop that was really granted: synchronously offline,
+  // when the transaction resolves online. Nothing here awaits, so the render path never
+  // blocks on the network.
+  function drain(target, amount, onTaken) {
     const i = typeof target === 'number' ? target : target && target.index;
     if (!(i >= 0) || !(amount > 0)) return null;
-    const taken = Math.min(reserve[i], amount);
-    if (taken <= 0) return null;
-    const species = table[speciesOf[i]];
-    reserve[i] -= taken;
-    depletion[i] = 1 - reserve[i] / reserveMax[i];
-    idleTimer[i] = 0;
-    writeColor(i);
-    writeMatrix(i, last.x, last.z);
-    const g = groups[speciesOf[i]];
-    g.mesh.instanceMatrix.needsUpdate = true;
-    const share = taken / reserveMax[i];
-    return {
-      taken,
-      pollen: species.pollen * share,
-      nectar: species.nectar * share,
-      resin: 0,
-      speciesId: species.id,
-    };
+
+    if (net) {
+      if (typeof onTaken === 'function') pendingCb[i] = onTaken;
+      pendingWant[i] += amount;
+      track(i);
+      pump(i);
+      return null;
+    }
+
+    const available = localAmount(i);
+    const taken = Math.min(available, amount);
+    if (!(taken > 0)) {
+      applyAmount(i, available);
+      return null;
+    }
+    storedAmt[i] = available - taken;
+    drainedAt[i] = Date.now();
+    track(i);
+    applyAmount(i, storedAmt[i]);
+    const scoop = makeScoop(i, taken);
+    if (typeof onTaken === 'function') onTaken(scoop);
+    return scoop;
+  }
+
+  function onRemoteFlower(id, entry) {
+    const i = indexOfId(id);
+    if (i < 0) return;
+    echoUntil[i] = 0;
+    const value = entry ? net.flowers.amount(id, specs[speciesOf[i]]) : reserveMax[i];
+    applyAmount(i, value);
+    if (value < reserveMax[i] - FULL_EPS) track(i);
+  }
+
+  // Called once the session's net handle exists (it is created after the world is built).
+  // From here the shared reserve is the only truth: a bloom nobody has touched reads
+  // full, not empty, and one nobody has touched since yesterday reads regrown.
+  function attachNet(handle) {
+    if (!handle || !handle.flowers || typeof handle.flowers.drain !== 'function') return false;
+    if (unsubscribeNet) { try { unsubscribeNet(); } catch (error) { /* already gone */ } }
+    net = handle;
+    unsubscribeNet = net.flowers.subscribe(onRemoteFlower) || null;
+    for (let i = 0; i < total; i++) {
+      pendingWant[i] = 0;
+      inFlight[i] = 0;
+      echoUntil[i] = 0;
+      const value = net.flowers.amount(ids[i], specs[speciesOf[i]]);
+      applyAmount(i, value);
+      if (value < reserveMax[i] - FULL_EPS) track(i);
+      else untrack(i);
+    }
+    return true;
+  }
+
+  function detachNet() {
+    if (unsubscribeNet) { try { unsubscribeNet(); } catch (error) { /* already gone */ } }
+    unsubscribeNet = null;
+    net = null;
   }
 
   function adopt(s, gltf) {
@@ -526,17 +742,15 @@ export function createFlowers(scene, terrain) {
     const px = last.x;
     const pz = last.z;
 
-    for (let i = 0; i < total; i++) {
-      if (reserve[i] >= reserveMax[i]) continue;
-      const species = table[speciesOf[i]];
-      idleTimer[i] += dt;
-      if (idleTimer[i] < species.regrowDelay) continue;
-      reserve[i] = Math.min(reserveMax[i], reserve[i] + species.regrowth * dt);
-      depletion[i] = 1 - reserve[i] / reserveMax[i];
-      if (Math.abs(depletion[i] - shown[i]) > 0.01 || reserve[i] >= reserveMax[i]) {
-        shown[i] = depletion[i];
-        writeColor(i);
-      }
+    // Re-derive only the flowers that are not full. No accumulation: the value comes
+    // from the drain stamp, so regrowth that happened while the tab was closed (or
+    // while another queen was the only one playing) is already in it.
+    const stamp = Date.now();
+    for (let n = trackedCount - 1; n >= 0; n--) {
+      const i = trackedList[n];
+      if (echoUntil[i] > stamp) continue;
+      applyAmount(i, amountOf(i));
+      if (reserve[i] >= reserveMax[i] - FULL_EPS && !inFlight[i] && !(pendingWant[i] > 0)) untrack(i);
     }
 
     const perFrame = Math.min(total, FLOWERS.updatePerFrame);
@@ -561,9 +775,15 @@ export function createFlowers(scene, terrain) {
     update,
     sampleNearest,
     drain,
+    attachNet,
+    detachNet,
+    get netAttached() { return Boolean(net); },
+    idOf: (i) => ids[i],
     headHeightOf: (s) => headOf[s],
     reserveOf: (i) => reserve[i],
+    trackedCount: () => trackedCount,
     dispose() {
+      detachNet();
       for (const g of groups) {
         g.mesh.geometry.dispose();
         g.mesh.material.dispose();

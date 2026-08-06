@@ -92,6 +92,27 @@
             ".validate": "newData.isNumber() && newData.val() <= now + 5000"
           },
           "host": { ".validate": "newData.isString() && newData.val().length <= 64" },
+          // lease — world-simulation ownership. Claimed and renewed by runTransaction
+          // with a server-checked expiry, so "exactly one owner" survives a frozen tab:
+          // a client that stops renewing drops its claim without needing to be told.
+          // exp may not be set further out than twice the lease length, or a client
+          // could park ownership indefinitely.
+          "lease": {
+            ".validate": "newData.hasChildren(['uid', 'exp'])",
+            "uid": { ".validate": "newData.isString() && newData.val().length <= 64" },
+            "exp": { ".validate": "newData.isNumber() && newData.val() <= now + 20000" },
+            "$other": { ".validate": false }
+          },
+          // weather — scheduled by the owner, stamped in server time so no client's
+          // own clock can shift the storm.
+          "weather": {
+            "kind": { ".validate": "newData.isString() && newData.val().length <= 24" },
+            "intensity": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 1" },
+            "seed": { ".validate": "newData.isNumber()" },
+            "durationMs": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+            "startedAt": { ".validate": "newData.isNumber() && newData.val() <= now + 5000" },
+            "$other": { ".validate": false }
+          },
           "meta": {
             "$uid": {
               "c": { ".validate": "newData.isString() && newData.val().length <= 16" },
