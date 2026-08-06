@@ -32,6 +32,7 @@
   <label>season</label>
   <select id="season"><option>spring</option><option selected>summer</option><option>autumn</option><option>winter</option></select>
 </div>
+<div id="driven" style="margin:8px 0;opacity:.75"></div>
 <pre id="out">running…</pre>
 <script type="module">
 import { AUDIO } from '../src/config.audio.js';
@@ -63,6 +64,7 @@ try {
   audio.music('season');
   audio.thunder(120);
   log(true, 'pre-unlock calls are silent no-ops (no throw)');
+  log(audio.weather.driven === true, 'weather.driven latched by setWeather() — internal thunder off');
 } catch (e) {
   log(false, 'pre-unlock threw: ' + e.message);
 }
@@ -116,6 +118,7 @@ document.getElementById('deposit').onclick = () => audio.play('deposit');
 document.getElementById('sting').onclick = () => audio.music('season', { force: true });
 document.getElementById('thunderNear').onclick = () => audio.thunder(40);
 document.getElementById('thunderFar').onclick = () => audio.thunder(420);
+setInterval(() => { document.getElementById('driven').textContent = 'weather.driven = ' + audio.weather.driven + '  kind = ' + audio.weather.kind; }, 500);
 window.audio = audio;
 </script>
 </body>

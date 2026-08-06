@@ -11,6 +11,9 @@ import { createEmitter } from './emitter.js';
 
 function noop() {}
 
+const EMPTY_CONTEXT = {};
+const VOLUME_KEYS = ['master', 'ambience', 'sfx', 'music'];
+
 function silentAudio() {
   const volumes = { ...AUDIO.volumes };
   return {
@@ -26,6 +29,7 @@ function silentAudio() {
     volumes,
     setHornets: noop,
     dispose: noop,
+    weather: { kind: 'clear', intensity: 0, wetness: 0, damp: 0, wind: 0, driven: false },
     available: false,
   };
 }
@@ -100,7 +104,8 @@ export function createAudio(camera) {
 
   function setVolumes(next) {
     if (!next) return volumes;
-    for (const key of ['master', 'ambience', 'sfx', 'music']) {
+    for (let i = 0; i < VOLUME_KEYS.length; i++) {
+      const key = VOLUME_KEYS[i];
       if (typeof next[key] === 'number' && isFinite(next[key])) {
         volumes[key] = Math.min(1.5, Math.max(0, next[key]));
         graph.setVolume(key, volumes[key]);
@@ -156,7 +161,7 @@ export function createAudio(camera) {
   function update(dt, context) {
     if (!state.unlocked) return;
     const step = Math.min(0.25, Math.max(0.0005, dt || 0));
-    const info = context || {};
+    const info = context || EMPTY_CONTEXT;
     const inside = Math.min(1, Math.max(0, info.insideness || 0));
     state.insideness = inside;
 
@@ -230,6 +235,7 @@ export function createAudio(camera) {
     volumes,
     setHornets,
     dispose,
+    weather: weather.state,
     available: true,
     context: ctx,
     library,

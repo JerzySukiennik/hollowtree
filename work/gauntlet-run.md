@@ -562,3 +562,27 @@ with a comment saying why.
 
 Verified in-engine after the change: boots clean, weather constructed, season reads `spring` offline, sun elevation
 moves between frames (96.2 -> 77.4) and the meadow renders. `net-logic` 27/0.
+
+## Audio revision — and a fourth measurement lesson
+
+Both Critic findings closed:
+
+- **Thunder divergence:** `driven` now latches on the first `setWeather()` rather than waiting for a lightning event —
+  the trap being that the `rain` preset carries `lightning: 0.0`, so the event never arrived and every client kept
+  rolling its own thunder. The fallback scheduler stays for the genuinely undriven case (standalone harness, a scene
+  without weather, a regression where the wiring is lost), where a storm bed with no thunder would be its own seam.
+  Verified by me: `driven` false before any state, true once a rain phase begins, **0 client-local strikes over 300 s
+  of rain and 300 s of storm**, `thunder()` still fires exactly one, and the undriven fallback still fires 26 over 300 s.
+- **Per-frame allocation:** the four `Object.keys()` calls are hoisted (plus two more the builder found).
+
+**The lesson is in how the second one was measured.** The Critic reported 10.18 B/frame from a `heapUsed`-delta
+harness. The builder could not reproduce it and ran controls: a stub that provably cannot allocate measured
+**3.375 B/frame**, and an *idle* loop calling `update()` zero times measured **3.211 B/frame**. The method's noise
+floor scales with live-heap size and cannot resolve at this magnitude — most of the 10.18 was floor. Re-measured with
+V8's sampling heap profiler after a 20 000-call warm-up: **0.009 B/frame** by the builder, 0.268 B/frame in my own
+run, both far inside the >=1 B/frame bar.
+
+So: a Critic's number is evidence about its instrument as much as about the artefact, and the right response to a
+number you cannot reproduce is a control run, not an argument. Fourth time this session that the measurement, not the
+code, was the thing that needed fixing — after the stale fps counter, the settled-state authority sample, and the
+throttled-tab timeouts.

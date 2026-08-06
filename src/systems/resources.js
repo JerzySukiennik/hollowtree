@@ -73,6 +73,30 @@ export function createResources() {
     return result ? -result[kind] : 0;
   }
 
+  // Capacity is not a constant: from M2 on it is the sum of the comb's store cells, so
+  // the nest decides how much the hive can hold. Lowering it below what is already
+  // stored spills the excess — a demolished store loses what it was holding.
+  function setCapacity(kind, value) {
+    if (!kinds.includes(kind)) return capacity[kind];
+    const next = Math.max(0, Number(value) || 0);
+    if (Math.abs(next - capacity[kind]) < 1e-9) return capacity[kind];
+    capacity[kind] = next;
+    if (store[kind] > next) {
+      const spill = store[kind] - next;
+      store[kind] = next;
+      revision++;
+      const delta = {};
+      for (const k of kinds) delta[k] = k === kind ? -spill : 0;
+      emit(delta);
+    }
+    return capacity[kind];
+  }
+
+  function room(kind) {
+    if (!kinds.includes(kind)) return 0;
+    return Math.max(0, capacity[kind] - store[kind]);
+  }
+
   function onChange(fn) {
     if (typeof fn !== 'function') return () => {};
     listeners.push(fn);
@@ -88,6 +112,8 @@ export function createResources() {
     apply,
     add,
     spend,
+    setCapacity,
+    room,
     snapshot,
     onChange,
     get revision() {

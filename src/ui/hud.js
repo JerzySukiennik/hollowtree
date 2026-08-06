@@ -2,11 +2,13 @@
 
 import { HUD, GATHER } from '../config.js';
 
+// Honey has no row of its own until the comb can make it: the row unlocks the moment a
+// honey store exists, which is the same moment the number stops being zero forever.
 const ROWS = [
   { kind: 'pollen', label: 'pollen', color: HUD.colors.pollen },
   { kind: 'nectar', label: 'nectar', color: HUD.colors.nectar },
   { kind: 'resin', label: 'resin', color: HUD.colors.resin },
-  { kind: 'honey', label: 'honey', color: HUD.colors.honey, locked: true },
+  { kind: 'honey', label: 'honey', color: HUD.colors.honey, needsCapacity: true },
 ];
 
 const CSS = `
@@ -65,6 +67,9 @@ align-items:flex-end;gap:7px}
 .ht-row-value{min-width:38px;text-align:right;font-size:15px;font-weight:600;
 letter-spacing:.01em;text-shadow:0 1px 4px rgba(0,0,0,.66);
 transition:transform .22s cubic-bezier(.34,1.56,.64,1),color .5s ease}
+.ht-row-cap{width:34px;text-align:left;font-size:9.5px;letter-spacing:.06em;
+color:${HUD.colors.dim};text-shadow:0 1px 3px rgba(0,0,0,.55)}
+.ht-row.is-brimming .ht-row-cap{color:#ffb27a}
 .ht-row.is-locked{opacity:.32}
 .ht-row.is-locked .ht-row-value{font-weight:500}
 .ht-row.is-gain .ht-row-value{transform:translateY(-2px) scale(1.09)}
@@ -110,16 +115,19 @@ export function createHud() {
   const bank = el('div', 'ht-bank', root);
   const rows = [];
   for (const spec of ROWS) {
-    const row = el('div', `ht-row${spec.locked ? ' is-locked' : ''}`, bank);
+    const locked = Boolean(spec.needsCapacity);
+    const row = el('div', `ht-row${locked ? ' is-locked' : ''}`, bank);
     const name = el('div', 'ht-label ht-row-name', row);
     name.textContent = spec.label;
     const dot = el('i', 'ht-dot', row);
     dot.style.background = spec.color;
     dot.style.color = spec.color;
     const value = el('div', 'ht-row-value', row);
-    value.style.color = spec.locked ? HUD.colors.dim : HUD.colors.text;
-    value.textContent = spec.locked ? '—' : '0';
-    rows.push({ spec, row, value, shown: 0, target: 0, pulse: 0 });
+    value.style.color = locked ? HUD.colors.dim : HUD.colors.text;
+    value.textContent = locked ? '—' : '0';
+    const cap = el('div', 'ht-row-cap', row);
+    cap.textContent = '';
+    rows.push({ spec, row, value, cap, shown: 0, target: 0, pulse: 0, locked });
   }
 
   document.body.appendChild(root);
@@ -188,9 +196,20 @@ export function createHud() {
     }
     bloomFill.style.width = `${(bloomShown * 100).toFixed(1)}%`;
 
+    const caps = model.capacity || null;
     for (const row of rows) {
-      if (row.spec.locked) continue;
-      const next = typeof res[row.spec.kind] === 'number' ? res[row.spec.kind] : row.target;
+      const kind = row.spec.kind;
+      const cap = caps && typeof caps[kind] === 'number' ? caps[kind] : null;
+      // A store the nest cannot hold yet stays greyed out rather than reading a false zero.
+      const locked = row.spec.needsCapacity ? !(cap > 0) : false;
+      if (locked !== row.locked) {
+        row.locked = locked;
+        row.row.classList.toggle('is-locked', locked);
+        row.value.style.color = locked ? HUD.colors.dim : HUD.colors.text;
+        if (locked) row.value.textContent = '—';
+      }
+      if (locked) { row.cap.textContent = ''; continue; }
+      const next = typeof res[kind] === 'number' ? res[kind] : row.target;
       if (next > row.target + 1e-4) {
         row.pulse = HUD.pulseDuration;
         row.row.classList.add('is-gain');
@@ -201,6 +220,9 @@ export function createHud() {
       if (Math.abs(row.target - row.shown) < 0.02) row.shown = row.target;
       const text = String(Math.round(row.shown));
       if (row.value.textContent !== text) row.value.textContent = text;
+      const capText = cap === null ? '' : `/${Math.round(cap)}`;
+      if (row.cap.textContent !== capText) row.cap.textContent = capText;
+      row.row.classList.toggle('is-brimming', cap !== null && cap > 0 && row.target >= cap - 0.5);
       if (row.pulse > 0) {
         row.pulse -= step;
         if (row.pulse <= 0) row.row.classList.remove('is-gain');

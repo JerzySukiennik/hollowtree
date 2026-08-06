@@ -4,6 +4,9 @@ import { AUDIO } from '../config.audio.js';
 import { createLayer } from './layer.js';
 
 const SEASON_NAMES = ['spring', 'summer', 'autumn', 'winter'];
+const WEIGHT_KEYS = Object.keys(AUDIO.ambience.seasons.summer);
+const LAYER_KEYS = Object.keys(AUDIO.ambience.layers);
+const INTERIOR_KEYS = ['hollow', 'hive'];
 
 function smoothstep(a, b, x) {
   if (b === a) return x < a ? 0 : 1;
@@ -32,7 +35,7 @@ function normalizeTime(timeOfDay) {
 export function createAmbience(ctx, library, destination) {
   const cfg = AUDIO.ambience;
   const layers = {};
-  for (const key of Object.keys(cfg.layers)) {
+  for (const key of LAYER_KEYS) {
     layers[key] = createLayer(ctx, library, cfg.layers[key].id, destination);
   }
 
@@ -49,8 +52,10 @@ export function createAmbience(ctx, library, destination) {
 
     const target = cfg.seasons[season] || cfg.seasons.summer;
     const seasonK = 1 - Math.exp(-dt / cfg.seasonGlide);
-    for (const key of Object.keys(target)) {
-      weights[key] = (weights[key] || 0) + (target[key] - (weights[key] || 0)) * seasonK;
+    for (let i = 0; i < WEIGHT_KEYS.length; i++) {
+      const key = WEIGHT_KEYS[i];
+      const want = target[key] || 0;
+      weights[key] = (weights[key] || 0) + (want - (weights[key] || 0)) * seasonK;
     }
 
     const tw = cfg.twilight;
@@ -78,8 +83,10 @@ export function createAmbience(ctx, library, destination) {
     layers.hive.setTarget(inside * base.hive.gain * (cfg.hiveRise * (0.45 + cfg.hiveSwarmBoost * hiveFill)));
 
     const glide = AUDIO.crossfade;
-    for (const key of Object.keys(layers)) {
-      layers[key].update(dt, key === 'hollow' || key === 'hive' ? AUDIO.insideFade * 3 : glide);
+    const interior = AUDIO.insideFade * 3;
+    for (let i = 0; i < LAYER_KEYS.length; i++) {
+      const key = LAYER_KEYS[i];
+      layers[key].update(dt, INTERIOR_KEYS.indexOf(key) === -1 ? glide : interior);
     }
   }
 
@@ -89,7 +96,7 @@ export function createAmbience(ctx, library, destination) {
   }
 
   function dispose() {
-    for (const key of Object.keys(layers)) layers[key].dispose();
+    for (let i = 0; i < LAYER_KEYS.length; i++) layers[LAYER_KEYS[i]].dispose();
   }
 
   return { layers, state, update, setWindBoost, dispose };

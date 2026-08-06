@@ -3,6 +3,9 @@
 import { AUDIO } from '../config.audio.js';
 import { createLayer } from './layer.js';
 
+const MIX_KEYS = ['rain', 'rainHeavy', 'gale', 'wind', 'damp'];
+const LAYER_KEYS = ['rain', 'rainHeavy', 'rainInside', 'rainInsideHeavy', 'gale'];
+
 export function createWeather(ctx, library, destination, oneShot) {
   const cfg = AUDIO.weather;
   const specs = cfg.layers;
@@ -24,6 +27,7 @@ export function createWeather(ctx, library, destination, oneShot) {
   }
 
   function setWeather(next) {
+    state.driven = true;
     const value = next || {};
     const kind = cfg.kinds[value.kind] ? value.kind : 'clear';
     state.kind = kind;
@@ -42,7 +46,8 @@ export function createWeather(ctx, library, destination, oneShot) {
     const inside = Math.min(1, Math.max(0, context.insideness || 0));
     const target = cfg.kinds[state.kind] || cfg.kinds.clear;
     const k = 1 - Math.exp(-dt / cfg.glide);
-    for (const key of Object.keys(mix)) {
+    for (let i = 0; i < MIX_KEYS.length; i++) {
+      const key = MIX_KEYS[i];
       const want = (target[key] || 0) * (key === 'damp' ? 1 : state.intensity);
       mix[key] += (want - mix[key]) * k;
     }
@@ -56,7 +61,7 @@ export function createWeather(ctx, library, destination, oneShot) {
     layers.rainInsideHeavy.setTarget(mix.rainHeavy * specs.rainInsideHeavy.gain * inside);
     layers.gale.setTarget(mix.gale * specs.gale.gain * (1 - inside * 0.7));
 
-    for (const key of Object.keys(layers)) layers[key].update(dt, cfg.glide);
+    for (let i = 0; i < LAYER_KEYS.length; i++) layers[LAYER_KEYS[i]].update(dt, cfg.glide);
 
     const stormy = !state.driven && (state.kind === 'storm' || (state.kind === 'rain' && state.intensity > 0.55));
     if (!stormy) {
@@ -79,7 +84,7 @@ export function createWeather(ctx, library, destination, oneShot) {
   }
 
   function dispose() {
-    for (const key of Object.keys(layers)) layers[key].dispose();
+    for (let i = 0; i < LAYER_KEYS.length; i++) layers[LAYER_KEYS[i]].dispose();
   }
 
   return { state, layers, setWeather, setDriven, update, dispose };
