@@ -289,6 +289,13 @@ export function createFlowers(scene, terrain) {
   const trackedList = new Int32Array(total);
   const trackedSlot = new Int32Array(total).fill(-1);
   let trackedCount = 0;
+  let refreshCursor = 0;
+  // A fresh meadow starts with every flower part-drained, so "all 1050 tracked" is a real
+  // startup state, not a synthetic worst case. The regrow refresh is therefore amortised
+  // over frames like the matrix write above it — at 0.3 units/sec, visiting each flower a
+  // few times a second is indistinguishable from visiting it every frame. Drains by other
+  // queens do NOT wait for their turn: those apply the moment the subscription fires.
+  const REFRESH_PER_FRAME = 220;
 
   let net = null;
   let unsubscribeNet = null;
@@ -730,11 +737,19 @@ export function createFlowers(scene, terrain) {
     g.authored = true;
   }
 
-  (async () => {
+  // Resolves once every authored model has been fetched and swapped in — or given up on.
+  // It never rejects and always settles, so a caller can await the meadow's final geometry
+  // instead of polling a flag on a timer (a hidden tab throttles timers, not fetches).
+  const modelsReady = (async () => {
     for (let s = 0; s < table.length; s++) {
       const file = table[s].model;
       if (!file) continue;
-      const gltf = await fetchModel(file);
+      let gltf = null;
+      try {
+        gltf = await fetchModel(file);
+      } catch (error) {
+        gltf = null;
+      }
       if (!gltf) {
         console.warn(`[flowers] ${file} not found — placeholder stand-in for "${table[s].id}"`);
         continue;
@@ -745,6 +760,7 @@ export function createFlowers(scene, terrain) {
         console.warn(`[flowers] could not adopt ${file} — ${error && error.message}`);
       }
     }
+    return groups.map((g) => g.authored);
   })();
 
   function update(dt, playerPosition) {
@@ -757,11 +773,16 @@ export function createFlowers(scene, terrain) {
     // from the drain stamp, so regrowth that happened while the tab was closed (or
     // while another queen was the only one playing) is already in it.
     const stamp = net ? serverNow() : Date.now();
-    for (let n = trackedCount - 1; n >= 0; n--) {
-      const i = trackedList[n];
-      if (inFlight[i]) continue;
+    const budget = Math.min(trackedCount, REFRESH_PER_FRAME);
+    for (let n = 0; n < budget && trackedCount > 0; n++) {
+      if (refreshCursor >= trackedCount) refreshCursor = 0;
+      const i = trackedList[refreshCursor];
+      if (inFlight[i]) { refreshCursor++; continue; }
       applyAmount(i, amountOf(i, stamp));
+      // untrack swaps the last entry into this slot, so the cursor stays put and examines
+      // the newcomer next time round; otherwise it moves on.
       if (reserve[i] >= reserveMax[i] - FULL_EPS && !(pendingWant[i] > 0)) untrack(i);
+      else refreshCursor++;
     }
 
     const perFrame = Math.min(total, FLOWERS.updatePerFrame);
@@ -786,6 +807,7 @@ export function createFlowers(scene, terrain) {
     update,
     sampleNearest,
     drain,
+    modelsReady,
     attachNet,
     detachNet,
     get netAttached() { return Boolean(net); },

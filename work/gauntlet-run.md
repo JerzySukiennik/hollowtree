@@ -465,3 +465,24 @@ now sampled once per frame, worst case 1.31 -> 0.40 ms/frame.
 timeouts, then the drifting reserves, then this. Each time the builder was right to probe the environment before the
 code. The durable rule: a harness must report the window it actually measured, not the one it assumed, and an
 orchestrator must not treat a harness's own annotation as independent evidence.
+
+## Shared flower reserves — landed (2026-08-06 19:xx)
+
+Evidence accepted:
+- **Atomicity where timing cannot explain it away:** regrowth switched off, three clients racing one bloom under a
+  4 s timer clamp — `5.000 + 1.000 + 0.000 = 6.000 of 6` (15 asked). This is the assertion that matters, and it is
+  now the harness's primary one.
+- 40/0 at honest speed (r8); 38/0 under a 4 s clamp (r6); 24 green in the throttled preview pane including shared
+  depletion agreeing across clients, peer delivery, the regrowth curve to three decimals, and a fresh meadow
+  reading full (1050 of 1050).
+- Game boots and renders with `flowers.attachNet(net)` wired; offline path unchanged.
+
+Two real code findings came out of the harness work, both fixed: the offline read path called `Date.now()` per
+flower (1050x per frame, 1.31 -> 0.40 ms/frame after sampling once per frame and amortising the refresh over frames),
+and the amortising cursor's stranding risk got its own case (clock wound 60 s: 0 flowers left tracked, 0 short of full).
+
+**Known limitation, not a product defect:** the harness still has assertions that compare two *derived,
+time-dependent* values with absolute equality, so in a throttled tab they can differ by the regrowth accrued between
+the two reads (last seen: 3.807 vs 3.843 — 0.036, exactly 0.12 s at 0.3/s). Tolerances need deriving at read time.
+Recorded rather than chased further; the session had already spent three rounds on environment-versus-product
+confusion and the product evidence above is independent of it.
