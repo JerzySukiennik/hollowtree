@@ -324,12 +324,15 @@ async function boot() {
 
   const viewSize = new THREE.Vector2();
 
+  // The quality tier's own cap, falling back to the global one.
+  let qualityCap = RENDER.maxPixelRatio;
+
   function resize() {
     const width = Math.round(canvas.clientWidth || window.innerWidth || 0);
     const height = Math.round(canvas.clientHeight || window.innerHeight || 0);
     if (width < 2 || height < 2) return;
     renderer.getSize(viewSize);
-    const ratio = Math.min(window.devicePixelRatio || 1, RENDER.maxPixelRatio);
+    const ratio = Math.min(window.devicePixelRatio || 1, qualityCap);
     if (viewSize.x === width && viewSize.y === height && renderer.getPixelRatio() === ratio) return;
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
@@ -356,6 +359,32 @@ async function boot() {
 
   function applySettings(settings) {
     if (!settings) return;
+    const tier = (RENDER.tiers && RENDER.tiers[settings.quality]) || null;
+    if (tier) {
+      // Pixel ratio is the biggest single lever on a laptop GPU: a Retina panel at
+      // 1.5 shades 2.25x the fragments of 1.0. The tier owns it, and the shadow map.
+      qualityCap = tier.pixelRatio;
+      const want = Math.min(window.devicePixelRatio || 1, qualityCap);
+      if (renderer.getPixelRatio() !== want) {
+        renderer.setPixelRatio(want);
+        const w = Math.round(canvas.clientWidth || window.innerWidth || 0);
+        const h = Math.round(canvas.clientHeight || window.innerHeight || 0);
+        if (w > 1 && h > 1) {
+          renderer.setSize(w, h, false);
+          if (post && typeof post.setSize === 'function') post.setSize(w, h);
+        }
+      }
+      renderer.shadowMap.enabled = tier.shadows !== false;
+      // The shadow map may not exist yet at boot; set the size either way and drop
+      // the old target only if three.js has already allocated one.
+      if (sky && sky.sun && sky.sun.shadow && sky.sun.shadow.mapSize.x !== tier.shadowMapSize) {
+        sky.sun.shadow.mapSize.setScalar(tier.shadowMapSize);
+        if (sky.sun.shadow.map) {
+          sky.sun.shadow.map.dispose();
+          sky.sun.shadow.map = null;
+        }
+      }
+    }
     if (post && typeof post.setQuality === 'function') post.setQuality(settings.quality);
     audio.setVolumes({ master: settings.master, music: settings.music, sfx: settings.sfx });
     if (weather && settings.quality) weather.setQuality(settings.quality);

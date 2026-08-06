@@ -109,6 +109,14 @@ export const RENDER = {
   targetFps: 40,
   maxPixelRatio: 1.5,
   shadowMapSize: 2048,
+  // What the quality tiers actually cost. Pixel ratio dominates: a Retina panel at
+  // 1.5 draws 2.25x the fragments of 1.0, which is the single biggest lever on an
+  // integrated or mobile GPU. Shadows are the second.
+  tiers: {
+    performance: { pixelRatio: 1.0, shadowMapSize: 1024, shadows: true },
+    balanced: { pixelRatio: 1.25, shadowMapSize: 2048, shadows: true },
+    high: { pixelRatio: 1.5, shadowMapSize: 2048, shadows: true },
+  },
   shadowRadius: 60,
   bloomStrength: 0.42,
   bloomRadius: 0.7,
