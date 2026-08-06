@@ -93,9 +93,18 @@ function windMaterial(color, strength, speed, uTime, key) {
     side: THREE.DoubleSide,
     dithering: true,
   });
+  const wind = {
+    base: strength,
+    strength: { value: strength },
+    dir: { value: new THREE.Vector2(1.0, 0.45) },
+    bias: { value: 0 },
+  };
+  mat.userData.wind = wind;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = uTime;
-    shader.uniforms.uWindStrength = { value: strength };
+    shader.uniforms.uWindStrength = wind.strength;
+    shader.uniforms.uWindDir = wind.dir;
+    shader.uniforms.uWindBias = wind.bias;
     shader.uniforms.uWindSpeed = { value: speed };
     shader.uniforms.uFieldColor = { value: new THREE.Color(PALETTE.ground).multiplyScalar(GRASS_DETAIL.mergeTint) };
     shader.uniforms.uMergeNear = { value: GRASS_DETAIL.mergeNear };
@@ -107,6 +116,8 @@ function windMaterial(color, strength, speed, uTime, key) {
 uniform float uTime;
 uniform float uWindStrength;
 uniform float uWindSpeed;
+uniform vec2 uWindDir;
+uniform float uWindBias;
 uniform vec3 uFieldColor;
 uniform float uMergeNear;
 uniform float uMergeFar;
@@ -131,8 +142,8 @@ float phase = iOrigin.x * 0.21 + iOrigin.z * 0.17;
 float gust = 0.65 + 0.35 * sin( uTime * uWindSpeed * 0.21 + iOrigin.x * 0.012 + iOrigin.z * 0.009 );
 float sway = sin( uTime * uWindSpeed + phase ) * 0.62 + sin( uTime * uWindSpeed * 1.73 + phase * 1.9 ) * 0.38;
 float bend = transformed.y * transformed.y * uWindStrength * gust;
-transformed.x += sway * bend;
-transformed.z += sway * bend * 0.45;
+transformed.x += bend * ( sway + uWindBias ) * uWindDir.x;
+transformed.z += bend * ( sway + uWindBias ) * uWindDir.y;
 #ifdef USE_COLOR
   float htP = htNoise( iOrigin.xz * 0.042 ) * 0.62 + htNoise( iOrigin.xz * 0.011 ) * 0.38;
   vColor.rgb *= mix( vec3( 0.78, 0.98, 0.72 ), vec3( 1.2, 1.06, 0.66 ), smoothstep( 0.34, 0.72, htP ) );
@@ -426,10 +437,25 @@ export function createGrass(scene, terrain) {
   updateClutter(0, 0);
   refreshAll(0, 0);
 
+  const windMaterials = [mat, tuftMat];
+
   return {
     grass,
     stones,
     tufts,
+    setWind(dirX, dirZ, strength, bias) {
+      const len = Math.hypot(dirX, dirZ);
+      const nx = len > 1e-4 ? dirX / len : 1;
+      const nz = len > 1e-4 ? dirZ / len : 0;
+      const scale = typeof strength === 'number' ? strength : 1;
+      const lean = typeof bias === 'number' ? bias : 0;
+      for (let i = 0; i < windMaterials.length; i++) {
+        const w = windMaterials[i].userData.wind;
+        w.dir.value.set(nx, nz);
+        w.strength.value = w.base * scale;
+        w.bias.value = lean;
+      }
+    },
     update(dt, playerPosition) {
       uTime.value += dt;
       const p = playerPosition || px0;

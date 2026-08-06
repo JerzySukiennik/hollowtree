@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hollowtree — net layer (M4) self test</title>
+<style>
+  html, body { background: #14100c; color: #f6e9cf; margin: 0; }
+  body { padding: 22px 26px; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h1 { font-size: 13px; letter-spacing: .18em; text-transform: uppercase; opacity: .6; margin: 0 0 14px; font-weight: 500; }
+  pre { white-space: pre-wrap; margin: 0; }
+</style>
+</head>
+<body>
+<h1>Hollowtree · net layer (M4) · local driver</h1>
+<pre id="report">running…</pre>
+<script type="module">
+import { createNet } from '../src/net/index.js';
+import { NET } from '../src/config.net.js';
+import { createSuite } from './net-cases.mjs';
+
+const out = document.getElementById('report');
+const lines = [];
+let passed = 0;
+let failed = 0;
+
+function log(text) { lines.push(text); out.textContent = lines.join('\n'); }
+function check(name, ok, detail) {
+  if (ok) { passed++; log(`PASS  ${name}${detail ? `  (${detail})` : ''}`); }
+  else { failed++; log(`FAIL  ${name}${detail ? `  (${detail})` : ''}`); }
+  return ok;
+}
+const section = (title) => { log(''); log(`— ${title}`); };
+// Timers, not requestAnimationFrame: rAF stalls in a background tab, which would
+// silently stretch a five-second flight into two minutes.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+window.addEventListener('error', (event) => log(`FAIL  uncaught — ${event.message}`));
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason;
+  log(`FAIL  unhandled rejection — ${reason && reason.stack ? reason.stack : reason}`);
+});
+
+const cases = createSuite({
+  createNet,
+  NET,
+  log,
+  check,
+  section,
+  sleep,
+  now: () => performance.now(),
+  wipe(code) {
+    try { localStorage.removeItem(NET.local.storagePrefix + code.toUpperCase()); } catch (error) { /* ignore */ }
+  },
+});
+
+// No case may stall the page. Each races a timeout that reports FAIL and moves on,
+// so a deadlock shows up as a failing line rather than a report that simply stops.
+async function runCase(entry) {
+  let timer = 0;
+  const guard = new Promise((resolve) => { timer = setTimeout(() => resolve('__timeout__'), entry.budget); });
+  try {
+    const result = await Promise.race([entry.fn().then(() => '__done__'), guard]);
+    if (result === '__timeout__') {
+      failed++;
+      log(`FAIL  ${entry.name} timed out after ${(entry.budget / 1000).toFixed(0)} s — the rest of this case did not run`);
+    }
+  } catch (error) {
+    failed++;
+    log(`FAIL  ${entry.name} threw — ${error && error.stack ? error.stack : error}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+(async () => {
+  const started = performance.now();
+  log(`INFO  driver forced to local · ${NET.rates.motionHz} Hz publish · interpolation delay ${NET.interpolation.baseDelayMs} ms base, ${NET.interpolation.minDelayMs}–${NET.interpolation.maxDelayMs} ms adaptive`);
+  for (const entry of cases) await runCase(entry);
+  log('');
+  log(`${passed} passed, ${failed} failed in ${((performance.now() - started) / 1000).toFixed(1)} s`);
+  log(failed ? 'RESULT FAIL' : 'RESULT PASS');
+  window.__netTest = { passed, failed, report: lines.join('\n') };
+})();
+</script>
+</body>
+</html>

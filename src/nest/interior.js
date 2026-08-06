@@ -1,4 +1,4 @@
-// Hollowtree — the hollow: authored shell when present, procedural stand-in otherwise, plus interior lighting, dust, wall colliders and camera containment.
+// Hollowtree — the hollow: a rectangular great hall, authored shell when present and a procedural stand-in otherwise, plus galleries, light wells, dust, AABB colliders and camera containment.
 
 import * as THREE from 'three';
 import { INTERIOR, HIVE, FLIGHT } from '../config.js';
@@ -6,11 +6,18 @@ import { createHexGrid } from './hexgrid.js';
 
 const _v = new THREE.Vector3();
 const _c = new THREE.Color();
+const _deep = new THREE.Color(INTERIOR.colors.wallDeep);
+const _lit = new THREE.Color(INTERIOR.colors.wallLit);
+const _base = new THREE.Color();
 
 function smoothstep(a, b, x) {
   if (b === a) return x < a ? 0 : 1;
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
 }
 
 function trunkRadiusAt(t) {
@@ -28,59 +35,110 @@ function buildSpec(hive, terrain) {
   const height = Math.min(Math.max(HIVE.trunkHeight * INTERIOR.heightScale, INTERIOR.minHeight), maxHeight);
   const ceilY = floorY + height;
 
-  const innerRadius = Math.max(INTERIOR.minInnerRadius, HIVE.trunkRadiusBase * INTERIOR.radiusScale);
-
-  const entranceWorld = hive && hive.entrance ? hive.entrance : null;
-  const entranceY = Math.min(
-    ceilY - height * 0.25,
-    Math.max(floorY + height * 0.08, entranceWorld ? entranceWorld.y : baseY + HIVE.entranceHeight)
-  );
-  const ex = entranceWorld ? entranceWorld.x - axisX : 0;
-  const ez = entranceWorld ? entranceWorld.z - axisZ : (HIVE.z <= 0 ? 1 : -1);
-  const entranceAngle = Math.atan2(ez, ex);
+  const width = INTERIOR.hallWidth;
+  const depth = INTERIOR.hallDepth;
   const entranceRadius = HIVE.entranceRadius;
 
-  const above = ceilY - entranceY;
-  const pad = height * INTERIOR.entrancePad;
-  const anchors = [
-    [floorY, INTERIOR.basinRadius],
-    [floorY + (entranceY - floorY) * INTERIOR.lowerAt, INTERIOR.lowerRadius],
-    [entranceY - pad, 1],
-    [entranceY + pad, 1],
-    [entranceY + above * INTERIOR.waistAt, INTERIOR.waistRadius],
-    [entranceY + above * INTERIOR.crownAt, INTERIOR.crownRadius],
-    [entranceY + above * INTERIOR.capAt, INTERIOR.capRadius],
-    [ceilY, INTERIOR.oculusRadius / innerRadius],
-  ];
-  for (let i = 1; i < anchors.length; i++) {
-    if (anchors[i][0] <= anchors[i - 1][0]) anchors[i][0] = anchors[i - 1][0] + 0.01;
-  }
+  const entranceWorld = hive && hive.entrance ? hive.entrance : null;
+  const ex = entranceWorld ? entranceWorld.x - axisX : 0;
+  const ez = entranceWorld ? entranceWorld.z - axisZ : (HIVE.z <= 0 ? 1 : -1) * HIVE.trunkRadiusBase;
+  const useZ = Math.abs(ez) >= Math.abs(ex);
+  const sign = useZ ? (ez >= 0 ? 1 : -1) : (ex >= 0 ? 1 : -1);
+  const reach = Math.max(entranceRadius + INTERIOR.throatLength, Math.abs(useZ ? ez : ex));
+  const wallOffset = reach - INTERIOR.throatLength;
 
-  function profile(y) {
-    if (y <= anchors[0][0]) return anchors[0][1];
-    for (let i = 1; i < anchors.length; i++) {
-      if (y <= anchors[i][0]) {
-        const k = smoothstep(anchors[i - 1][0], anchors[i][0], y);
-        return anchors[i - 1][1] + (anchors[i][1] - anchors[i - 1][1]) * k;
-      }
+  let minX;
+  let maxX;
+  let minZ;
+  let maxZ;
+  if (useZ) {
+    minX = axisX - width * 0.5;
+    maxX = axisX + width * 0.5;
+    if (sign > 0) {
+      maxZ = axisZ + wallOffset;
+      minZ = maxZ - depth;
+    } else {
+      minZ = axisZ - wallOffset;
+      maxZ = minZ + depth;
     }
-    return anchors[anchors.length - 1][1];
+  } else {
+    minZ = axisZ - width * 0.5;
+    maxZ = axisZ + width * 0.5;
+    if (sign > 0) {
+      maxX = axisX + wallOffset;
+      minX = maxX - depth;
+    } else {
+      minX = axisX - wallOffset;
+      maxX = minX + depth;
+    }
   }
 
-  function radiusAt(y) {
-    return innerRadius * profile(y);
-  }
-
-  function outerRadiusAt(y) {
-    const t = (y - baseY) / Math.max(1, HIVE.trunkHeight);
-    return Math.max(trunkRadiusAt(t), radiusAt(y) + INTERIOR.wallThickness);
-  }
-
-  const entrancePos = new THREE.Vector3(
-    axisX + Math.cos(entranceAngle) * radiusAt(entranceY),
-    entranceY,
-    axisZ + Math.sin(entranceAngle) * radiusAt(entranceY)
+  const entranceY = Math.min(
+    ceilY - height * 0.22,
+    Math.max(floorY + height * 0.1, entranceWorld ? entranceWorld.y : baseY + HIVE.entranceHeight)
   );
+
+  const entranceNormal = new THREE.Vector3(useZ ? 0 : sign, 0, useZ ? sign : 0);
+  const entrancePos = new THREE.Vector3(
+    useZ ? axisX : (sign > 0 ? maxX : minX),
+    entranceY,
+    useZ ? (sign > 0 ? maxZ : minZ) : axisZ
+  );
+
+  const wallLengths = [maxX - minX, maxZ - minZ, maxX - minX, maxZ - minZ];
+  const wallStarts = [0, wallLengths[0], wallLengths[0] + wallLengths[1], wallLengths[0] + wallLengths[1] + wallLengths[2]];
+  const perimeter = wallStarts[3] + wallLengths[3];
+
+  let entranceWall;
+  let entranceS;
+  if (useZ && sign > 0) {
+    entranceWall = 0;
+    entranceS = wallStarts[0] + (entrancePos.x - minX);
+  } else if (!useZ && sign > 0) {
+    entranceWall = 1;
+    entranceS = wallStarts[1] + (maxZ - entrancePos.z);
+  } else if (useZ) {
+    entranceWall = 2;
+    entranceS = wallStarts[2] + (maxX - entrancePos.x);
+  } else {
+    entranceWall = 3;
+    entranceS = wallStarts[3] + (entrancePos.z - minZ);
+  }
+
+  const half = Math.max(1, trunkRadiusAt((entranceY - baseY) / Math.max(1, HIVE.trunkHeight))) * INTERIOR.clipLateral;
+
+  const skylights = [];
+  const cx = (minX + maxX) * 0.5;
+  const cz = (minZ + maxZ) * 0.5;
+  const spanX = useZ ? INTERIOR.skylightSpanX * (maxX - minX) * 0.5 : INTERIOR.skylightSpanZ * (maxX - minX) * 0.5;
+  const spanZ = useZ ? INTERIOR.skylightSpanZ * (maxZ - minZ) * 0.5 : INTERIOR.skylightSpanX * (maxZ - minZ) * 0.5;
+  skylights.push({ x: cx - spanX, z: cz + spanZ });
+  skylights.push({ x: cx + spanX, z: cz - spanZ });
+
+  function insideDepth(point) {
+    const dx = Math.min(point.x - minX, maxX - point.x);
+    const dz = Math.min(point.z - minZ, maxZ - point.z);
+    const dy = Math.min(point.y - floorY, ceilY - point.y);
+    return Math.min(dx, dz, dy);
+  }
+
+  function outward(point) {
+    return useZ
+      ? (sign > 0 ? point.z - maxZ : minZ - point.z)
+      : (sign > 0 ? point.x - maxX : minX - point.x);
+  }
+
+  function inAperture(point) {
+    const lateral = useZ ? Math.abs(point.x - entrancePos.x) : Math.abs(point.z - entrancePos.z);
+    if (lateral > entranceRadius * 1.15) return false;
+    if (Math.abs(point.y - entranceY) > entranceRadius * 1.15) return false;
+    const out = outward(point);
+    return out > -INTERIOR.insideMargin * 2 && out < INTERIOR.throatLength + 2;
+  }
+
+  function beyondEntranceWall(point) {
+    return outward(point) < 0;
+  }
 
   return {
     axisX,
@@ -89,185 +147,308 @@ function buildSpec(hive, terrain) {
     floorY,
     ceilY,
     height,
-    innerRadius,
-    refRadius: innerRadius,
+    width: maxX - minX,
+    depth: maxZ - minZ,
+    minX,
+    maxX,
+    minZ,
+    maxZ,
+    centerX: cx,
+    centerZ: cz,
+    perimeter,
+    wallStarts,
+    wallLengths,
     entranceY,
-    entranceAngle,
     entranceRadius,
     entrancePos,
-    radiusAt,
-    outerRadiusAt,
-    oversized: innerRadius + INTERIOR.wallThickness > trunkRadiusAt((entranceY - baseY) / Math.max(1, HIVE.trunkHeight)),
+    entranceNormal,
+    entranceWall,
+    entranceS,
+    entranceAxisZ: useZ,
+    entranceSign: sign,
+    clipHalf: half,
+    skylights,
+    insideDepth,
+    outward,
+    inAperture,
+    beyondEntranceWall,
+    oversized: Math.max(maxX - minX, maxZ - minZ) * 0.5 > HIVE.trunkRadiusBase,
   };
 }
 
-function shellLuminance(spec, x, y, z) {
-  const dxe = x - spec.entrancePos.x;
-  const dye = y - spec.entrancePos.y;
-  const dze = z - spec.entrancePos.z;
-  const dEntrance = Math.sqrt(dxe * dxe + dye * dye + dze * dze);
-  const entrance = 1 - smoothstep(2, spec.innerRadius * 2.6, dEntrance);
+function hallLuminance(spec, x, y, z) {
+  const dEntrance = Math.hypot(x - spec.entrancePos.x, y - spec.entrancePos.y, z - spec.entrancePos.z);
+  const entrance = 1 - smoothstep(3, spec.depth * 1.15, dEntrance);
 
-  const radial = Math.hypot(x - spec.axisX, z - spec.axisZ);
-  const oculus =
-    smoothstep(spec.ceilY - spec.height * 0.5, spec.ceilY, y) *
-    (1 - smoothstep(spec.innerRadius * 0.3, spec.innerRadius, radial) * 0.55);
+  let sky = 0;
+  for (let i = 0; i < spec.skylights.length; i++) {
+    const s = spec.skylights[i];
+    const d = Math.hypot(x - s.x, z - s.z);
+    const near = 1 - smoothstep(INTERIOR.skylightWidth * 0.5, INTERIOR.skylightWidth * 3.4, d);
+    sky = Math.max(sky, near * smoothstep(spec.floorY, spec.ceilY, y));
+  }
 
-  const basin = smoothstep(spec.floorY + spec.height * 0.1, spec.floorY, y) * 0.35;
-  return Math.min(1.35, entrance * 0.95 + oculus * 0.8 + basin);
+  let knot = 0;
+  if (spec.knots) {
+    for (let i = 0; i < spec.knots.length; i++) {
+      const k = spec.knots[i];
+      const d = Math.hypot(x - k.x, y - k.y, z - k.z);
+      knot = Math.max(knot, 1 - smoothstep(INTERIOR.knotWidth, INTERIOR.knotBeamLength * 0.5, d));
+    }
+  }
+
+  const rise = smoothstep(spec.floorY, spec.floorY + spec.height * 0.3, y) * 0.22;
+  const corner =
+    smoothstep(spec.width * 0.5, spec.width * 0.18, Math.abs(x - spec.centerX)) *
+    smoothstep(spec.depth * 0.5, spec.depth * 0.18, Math.abs(z - spec.centerZ));
+
+  return Math.min(1.4, entrance * 0.85 + sky * 0.8 + knot * 0.7 + rise + corner * 0.12);
 }
 
-const _deep = new THREE.Color(INTERIOR.colors.wallDeep);
-const _lit = new THREE.Color(INTERIOR.colors.wallLit);
-const _base = new THREE.Color();
-
-function pushVertex(pos, col, nrm, spec, x, y, z, nx, ny, nz, base) {
-  const lum = shellLuminance(spec, x, y, z);
-  _c.copy(_deep).lerp(_base.set(base), Math.min(1, 0.25 + lum * 0.55));
-  _c.lerp(_lit, Math.min(0.85, lum * 0.6));
-  pos.push(x, y, z);
-  nrm.push(nx, ny, nz);
-  col.push(_c.r, _c.g, _c.b);
-  return pos.length / 3 - 1;
+function newBuf() {
+  return { pos: [], nrm: [], col: [], idx: [] };
 }
 
-function buildPlaceholderShell(spec) {
-  const pos = [];
-  const nrm = [];
-  const col = [];
-  const idx = [];
+function vert(buf, spec, x, y, z, nx, ny, nz, base) {
+  const lum = hallLuminance(spec, x, y, z);
+  _c.copy(_deep).lerp(_base.set(base), Math.min(1, 0.28 + lum * 0.6));
+  _c.lerp(_lit, Math.min(0.85, lum * 0.62));
+  buf.pos.push(x, y, z);
+  buf.nrm.push(nx, ny, nz);
+  buf.col.push(_c.r, _c.g, _c.b);
+  return buf.pos.length / 3 - 1;
+}
 
-  const seg = INTERIOR.radialSegments;
-  const rows = INTERIOR.heightSegments;
-  const dy = (spec.ceilY - spec.floorY) / rows;
-  const aperture = Math.atan2(spec.entranceRadius * 1.05, Math.max(1, spec.radiusAt(spec.entranceY)));
-
-  const ring = [];
+function addGrid(buf, spec, ox, oy, oz, ux, uy, uz, vx, vy, vz, uLen, vLen, cols, rows, nx, ny, nz, base, holes) {
+  const grid = [];
   for (let r = 0; r <= rows; r++) {
-    const y = spec.floorY + r * dy;
-    const radius = spec.radiusAt(y);
-    const row = [];
-    for (let i = 0; i < seg; i++) {
-      const a = (i / seg) * Math.PI * 2;
-      const wob = 1 + Math.sin(a * 3 + y * 0.21) * 0.045 + Math.sin(a * 7 - y * 0.09) * 0.02;
-      const rr = radius * wob;
-      const x = spec.axisX + Math.cos(a) * rr;
-      const z = spec.axisZ + Math.sin(a) * rr;
-      row.push(pushVertex(pos, col, nrm, spec, x, y, z, -Math.cos(a), 0, -Math.sin(a), INTERIOR.colors.wall));
+    const v = (r / rows) * vLen;
+    const line = [];
+    for (let c = 0; c <= cols; c++) {
+      const u = (c / cols) * uLen;
+      line.push(
+        vert(buf, spec, ox + ux * u + vx * v, oy + uy * u + vy * v, oz + uz * u + vz * v, nx, ny, nz, base)
+      );
     }
-    ring.push(row);
+    grid.push(line);
   }
-
-  function angleDelta(a, b) {
-    let d = (a - b) % (Math.PI * 2);
-    if (d > Math.PI) d -= Math.PI * 2;
-    if (d < -Math.PI) d += Math.PI * 2;
-    return Math.abs(d);
-  }
-
   for (let r = 0; r < rows; r++) {
-    const y = spec.floorY + (r + 0.5) * dy;
-    for (let i = 0; i < seg; i++) {
-      const a = ((i + 0.5) / seg) * Math.PI * 2;
-      const inHole =
-        angleDelta(a, spec.entranceAngle) < aperture &&
-        Math.abs(y - spec.entranceY) < spec.entranceRadius * 1.05;
-      if (inHole) continue;
-      const a0 = ring[r][i];
-      const a1 = ring[r][(i + 1) % seg];
-      const b0 = ring[r + 1][i];
-      const b1 = ring[r + 1][(i + 1) % seg];
-      idx.push(a0, a1, b0, a1, b1, b0);
+    const vm = ((r + 0.5) / rows) * vLen;
+    for (let c = 0; c < cols; c++) {
+      const um = ((c + 0.5) / cols) * uLen;
+      let skip = false;
+      if (holes) {
+        for (let h = 0; h < holes.length; h++) {
+          const hole = holes[h];
+          if (um > hole.u0 && um < hole.u1 && vm > hole.v0 && vm < hole.v1) {
+            skip = true;
+            break;
+          }
+        }
+      }
+      if (skip) continue;
+      const a = grid[r][c];
+      const b = grid[r][c + 1];
+      const d = grid[r + 1][c];
+      const e = grid[r + 1][c + 1];
+      buf.idx.push(a, b, d, b, e, d);
     }
   }
+}
 
-  const floorCenter = pushVertex(
-    pos, col, nrm, spec, spec.axisX, spec.floorY - 0.15, spec.axisZ, 0, 1, 0, INTERIOR.colors.floor
-  );
-  for (let i = 0; i < seg; i++) {
-    idx.push(floorCenter, ring[0][(i + 1) % seg], ring[0][i]);
+function addBox(buf, spec, min, max, base) {
+  const faces = [
+    [0, 1, 0, min.x, max.y, min.z, 1, 0, 0, 0, 0, 1, max.x - min.x, max.z - min.z],
+    [0, -1, 0, min.x, min.y, min.z, 1, 0, 0, 0, 0, 1, max.x - min.x, max.z - min.z],
+    [1, 0, 0, max.x, min.y, min.z, 0, 0, 1, 0, 1, 0, max.z - min.z, max.y - min.y],
+    [-1, 0, 0, min.x, min.y, min.z, 0, 0, 1, 0, 1, 0, max.z - min.z, max.y - min.y],
+    [0, 0, 1, min.x, min.y, max.z, 1, 0, 0, 0, 1, 0, max.x - min.x, max.y - min.y],
+    [0, 0, -1, min.x, min.y, min.z, 1, 0, 0, 0, 1, 0, max.x - min.x, max.y - min.y],
+  ];
+  for (const f of faces) {
+    const [nx, ny, nz, ox, oy, oz, ux, uy, uz, vx, vy, vz, uLen, vLen] = f;
+    const a = vert(buf, spec, ox, oy, oz, nx, ny, nz, base);
+    const b = vert(buf, spec, ox + ux * uLen, oy + uy * uLen, oz + uz * uLen, nx, ny, nz, base);
+    const c = vert(buf, spec, ox + vx * vLen, oy + vy * vLen, oz + vz * vLen, nx, ny, nz, base);
+    const d = vert(buf, spec, ox + ux * uLen + vx * vLen, oy + uy * uLen + vy * vLen, oz + uz * uLen + vz * vLen, nx, ny, nz, base);
+    buf.idx.push(a, b, c, b, d, c);
   }
+}
 
-  const capRing = [];
-  const capY = spec.ceilY;
-  for (let i = 0; i < seg; i++) {
-    const a = (i / seg) * Math.PI * 2;
-    capRing.push(
-      pushVertex(
-        pos, col, nrm, spec,
-        spec.axisX + Math.cos(a) * INTERIOR.oculusRadius,
-        capY + 0.2,
-        spec.axisZ + Math.sin(a) * INTERIOR.oculusRadius,
-        0, -1, 0, INTERIOR.colors.wall
-      )
-    );
-  }
-  for (let i = 0; i < seg; i++) {
-    const a0 = ring[rows][i];
-    const a1 = ring[rows][(i + 1) % seg];
-    idx.push(a0, capRing[i], a1, a1, capRing[i], capRing[(i + 1) % seg]);
-  }
+function galleryBoxes(spec) {
+  const boxes = [];
+  const tiers = Math.max(1, INTERIOR.galleryTiers);
+  const runLong = spec.width * INTERIOR.ledgeRunLong;
+  const runShort = spec.depth * INTERIOR.ledgeRunShort;
+  const th = INTERIOR.ledgeThickness;
+  const dp = INTERIOR.ledgeDepth;
 
-  for (let l = 0; l < INTERIOR.ledgeCount; l++) {
-    const t = INTERIOR.ledgeStart + (l / Math.max(1, INTERIOR.ledgeCount - 1)) * (INTERIOR.ledgeEnd - INTERIOR.ledgeStart);
-    const y = spec.floorY + t * spec.height;
-    const radius = spec.radiusAt(y);
-    if (radius < INTERIOR.ledgeDepth * 1.6) continue;
-    const mid = spec.entranceAngle + Math.PI * 0.55 + l * 2.399;
-    const half = INTERIOR.ledgeArc * 0.5;
-    const steps = 6;
-    const outerTop = [];
-    const innerTop = [];
-    const outerBot = [];
-    const innerBot = [];
-    for (let s = 0; s <= steps; s++) {
-      const a = mid - half + (s / steps) * INTERIOR.ledgeArc;
-      const ro = radius * 0.995;
-      const ri = Math.max(1, radius - INTERIOR.ledgeDepth * (0.6 + 0.4 * Math.sin((s / steps) * Math.PI)));
-      const cx = Math.cos(a);
-      const cz = Math.sin(a);
-      outerTop.push(pushVertex(pos, col, nrm, spec, spec.axisX + cx * ro, y, spec.axisZ + cz * ro, 0, 1, 0, INTERIOR.colors.ledge));
-      innerTop.push(pushVertex(pos, col, nrm, spec, spec.axisX + cx * ri, y, spec.axisZ + cz * ri, 0, 1, 0, INTERIOR.colors.ledge));
-      outerBot.push(pushVertex(pos, col, nrm, spec, spec.axisX + cx * ro, y - INTERIOR.ledgeThickness, spec.axisZ + cz * ro, 0, -1, 0, INTERIOR.colors.wallDeep));
-      innerBot.push(pushVertex(pos, col, nrm, spec, spec.axisX + cx * ri, y - INTERIOR.ledgeThickness, spec.axisZ + cz * ri, 0, -1, 0, INTERIOR.colors.wallDeep));
+  for (let t = 0; t < tiers; t++) {
+    const k = tiers === 1 ? 0.5 : t / (tiers - 1);
+    const y = spec.floorY + lerp(INTERIOR.galleryStart, INTERIOR.galleryEnd, k) * spec.height;
+    const swing = (t % 2 === 0 ? 1 : -1) * 0.16;
+
+    const cx = spec.centerX + spec.width * swing;
+    boxes.push({
+      min: new THREE.Vector3(cx - runLong * 0.5, y - th, spec.minZ),
+      max: new THREE.Vector3(cx + runLong * 0.5, y, spec.minZ + dp),
+    });
+    boxes.push({
+      min: new THREE.Vector3(cx - runLong * 0.5, y - th, spec.maxZ - dp),
+      max: new THREE.Vector3(cx + runLong * 0.5, y, spec.maxZ),
+    });
+
+    const cz = spec.centerZ - spec.depth * swing;
+    boxes.push({
+      min: new THREE.Vector3(spec.minX, y - th, cz - runShort * 0.5),
+      max: new THREE.Vector3(spec.minX + dp, y, cz + runShort * 0.5),
+    });
+    boxes.push({
+      min: new THREE.Vector3(spec.maxX - dp, y - th, cz - runShort * 0.5),
+      max: new THREE.Vector3(spec.maxX, y, cz + runShort * 0.5),
+    });
+  }
+  return boxes;
+}
+
+function alcoveBoxes(spec) {
+  const boxes = [];
+  const tiers = Math.max(1, INTERIOR.alcoveTiers);
+  const w = INTERIOR.alcoveWidth;
+  const d = INTERIOR.alcoveDepth;
+  const th = INTERIOR.ledgeThickness * 1.4;
+  const corners = [
+    [spec.minX, spec.minZ, 1, 1],
+    [spec.maxX, spec.minZ, -1, 1],
+    [spec.minX, spec.maxZ, 1, -1],
+    [spec.maxX, spec.maxZ, -1, -1],
+  ];
+  for (let i = 0; i < corners.length; i++) {
+    const [x, z, sx, sz] = corners[i];
+    for (let t = 0; t < tiers; t++) {
+      const k = (t + (i % 2) * 0.5) / Math.max(1, tiers - 1 + 0.5);
+      const y = spec.floorY + lerp(INTERIOR.alcoveStart, INTERIOR.alcoveEnd, Math.min(1, k)) * spec.height;
+      boxes.push({
+        min: new THREE.Vector3(Math.min(x, x + sx * w), y - th, Math.min(z, z + sz * d)),
+        max: new THREE.Vector3(Math.max(x, x + sx * w), y, Math.max(z, z + sz * d)),
+      });
     }
-    for (let s = 0; s < steps; s++) {
-      idx.push(outerTop[s], innerTop[s], outerTop[s + 1], innerTop[s], innerTop[s + 1], outerTop[s + 1]);
-      idx.push(outerBot[s], outerBot[s + 1], innerBot[s], innerBot[s], outerBot[s + 1], innerBot[s + 1]);
-      idx.push(innerTop[s], innerBot[s], innerTop[s + 1], innerBot[s], innerBot[s + 1], innerTop[s + 1]);
-    }
   }
+  return boxes;
+}
 
-  const throatDir = new THREE.Vector3(Math.cos(spec.entranceAngle), 0, Math.sin(spec.entranceAngle));
-  const inner = spec.radiusAt(spec.entranceY);
-  const outer = inner + INTERIOR.throatLength;
-  const tSeg = 12;
-  const innerRing = [];
-  const outerRing = [];
-  for (let i = 0; i < tSeg; i++) {
-    const a = (i / tSeg) * Math.PI * 2;
-    const up = Math.sin(a);
-    const side = Math.cos(a);
-    const rIn = spec.entranceRadius * INTERIOR.throatFlare;
-    const rOut = spec.entranceRadius;
-    const tangent = new THREE.Vector3(-throatDir.z, 0, throatDir.x);
-    const px = spec.axisX + throatDir.x * inner + tangent.x * side * rIn;
-    const pz = spec.axisZ + throatDir.z * inner + tangent.z * side * rIn;
-    const qx = spec.axisX + throatDir.x * outer + tangent.x * side * rOut;
-    const qz = spec.axisZ + throatDir.z * outer + tangent.z * side * rOut;
-    innerRing.push(pushVertex(pos, col, nrm, spec, px, spec.entranceY + up * rIn, pz, -side * tangent.x, -up, -side * tangent.z, INTERIOR.colors.ledge));
-    outerRing.push(pushVertex(pos, col, nrm, spec, qx, spec.entranceY + up * rOut, qz, -side * tangent.x, -up, -side * tangent.z, INTERIOR.colors.wall));
+function pillarBoxes(spec) {
+  const boxes = [];
+  const h = INTERIOR.pillarSize * 0.5;
+  const offsets = [
+    [-INTERIOR.pillarSpanX, -INTERIOR.pillarSpanZ],
+    [INTERIOR.pillarSpanX, INTERIOR.pillarSpanZ],
+    [-INTERIOR.pillarSpanX * 0.42, INTERIOR.pillarSpanZ],
+    [INTERIOR.pillarSpanX * 0.42, -INTERIOR.pillarSpanZ],
+  ];
+  for (const [ox, oz] of offsets) {
+    const x = spec.centerX + ox * spec.width * 0.5;
+    const z = spec.centerZ + oz * spec.depth * 0.5;
+    boxes.push({
+      min: new THREE.Vector3(x - h, spec.floorY, z - h),
+      max: new THREE.Vector3(x + h, spec.ceilY, z + h),
+    });
   }
-  for (let i = 0; i < tSeg; i++) {
-    const j = (i + 1) % tSeg;
-    idx.push(innerRing[i], outerRing[i], innerRing[j], innerRing[j], outerRing[i], outerRing[j]);
+  return boxes;
+}
+
+function landingBox(spec) {
+  const w = INTERIOR.landingWidth * 0.5;
+  const d = INTERIOR.landingDepth;
+  const y = spec.entranceY - spec.entranceRadius * 0.8;
+  if (spec.entranceAxisZ) {
+    const z0 = spec.entranceSign > 0 ? spec.maxZ - d : spec.minZ;
+    return {
+      min: new THREE.Vector3(spec.entrancePos.x - w, y - INTERIOR.landingThickness, z0),
+      max: new THREE.Vector3(spec.entrancePos.x + w, y, z0 + d),
+    };
+  }
+  const x0 = spec.entranceSign > 0 ? spec.maxX - d : spec.minX;
+  return {
+    min: new THREE.Vector3(x0, y - INTERIOR.landingThickness, spec.entrancePos.z - w),
+    max: new THREE.Vector3(x0 + d, y, spec.entrancePos.z + w),
+  };
+}
+
+function PLACEHOLDER_hallShell(spec, ledges) {
+  const buf = newBuf();
+  const long = INTERIOR.segmentsLong;
+  const short = INTERIOR.segmentsShort;
+  const up = INTERIOR.segmentsUp;
+  const W = spec.width;
+  const D = spec.depth;
+  const H = spec.height;
+
+  const ceilHoles = spec.skylights.map((s) => ({
+    u0: s.x - spec.minX - INTERIOR.skylightWidth * 0.5,
+    u1: s.x - spec.minX + INTERIOR.skylightWidth * 0.5,
+    v0: s.z - spec.minZ - INTERIOR.skylightDepth * 0.5,
+    v1: s.z - spec.minZ + INTERIOR.skylightDepth * 0.5,
+  }));
+
+  addGrid(buf, spec, spec.minX, spec.floorY, spec.minZ, 1, 0, 0, 0, 0, 1, W, D, long, short, 0, 1, 0, INTERIOR.colors.floor, null);
+  addGrid(buf, spec, spec.minX, spec.ceilY, spec.minZ, 1, 0, 0, 0, 0, 1, W, D, long, short, 0, -1, 0, INTERIOR.colors.ceiling, ceilHoles);
+
+  const g = spec.entranceRadius;
+  const holeZ = [{
+    u0: spec.entrancePos.x - spec.minX - g,
+    u1: spec.entrancePos.x - spec.minX + g,
+    v0: spec.entranceY - spec.floorY - g,
+    v1: spec.entranceY - spec.floorY + g,
+  }];
+  const holeX = [{
+    u0: spec.entrancePos.z - spec.minZ - g,
+    u1: spec.entrancePos.z - spec.minZ + g,
+    v0: spec.entranceY - spec.floorY - g,
+    v1: spec.entranceY - spec.floorY + g,
+  }];
+  const onZ = spec.entranceAxisZ;
+
+  addGrid(buf, spec, spec.minX, spec.floorY, spec.maxZ, 1, 0, 0, 0, 1, 0, W, H, long, up, 0, 0, -1, INTERIOR.colors.wall,
+    onZ && spec.entranceSign > 0 ? holeZ : null);
+  addGrid(buf, spec, spec.minX, spec.floorY, spec.minZ, 1, 0, 0, 0, 1, 0, W, H, long, up, 0, 0, 1, INTERIOR.colors.wall,
+    onZ && spec.entranceSign < 0 ? holeZ : null);
+  addGrid(buf, spec, spec.maxX, spec.floorY, spec.minZ, 0, 0, 1, 0, 1, 0, D, H, short, up, -1, 0, 0, INTERIOR.colors.wall,
+    !onZ && spec.entranceSign > 0 ? holeX : null);
+  addGrid(buf, spec, spec.minX, spec.floorY, spec.minZ, 0, 0, 1, 0, 1, 0, D, H, short, up, 1, 0, 0, INTERIOR.colors.wall,
+    !onZ && spec.entranceSign < 0 ? holeX : null);
+
+  for (const box of ledges) addBox(buf, spec, box.min, box.max, INTERIOR.colors.ledge);
+
+  const n = spec.entranceNormal;
+  const inner = g * INTERIOR.throatFlare;
+  const outer = g;
+  const L = INTERIOR.throatLength;
+  const tx = spec.entranceAxisZ ? 1 : 0;
+  const tz = spec.entranceAxisZ ? 0 : 1;
+  const p = spec.entrancePos;
+  const ring = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+  const innerIdx = [];
+  const outerIdx = [];
+  for (let i = 0; i < 4; i++) {
+    const [su, sv] = ring[i];
+    innerIdx.push(vert(buf, spec,
+      p.x + tx * su * inner, p.y + sv * inner, p.z + tz * su * inner,
+      -su * tx, -sv, -su * tz, INTERIOR.colors.ledge));
+    outerIdx.push(vert(buf, spec,
+      p.x + n.x * L + tx * su * outer, p.y + sv * outer, p.z + n.z * L + tz * su * outer,
+      -su * tx, -sv, -su * tz, INTERIOR.colors.wall));
+  }
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    buf.idx.push(innerIdx[i], outerIdx[i], innerIdx[j], innerIdx[j], outerIdx[i], outerIdx[j]);
   }
 
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
-  geometry.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  geometry.setIndex(idx);
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(buf.pos, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(buf.nrm, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(buf.col, 3));
+  geometry.setIndex(buf.idx);
   geometry.computeBoundingSphere();
 
   const mesh = new THREE.Mesh(
@@ -279,21 +460,21 @@ function buildPlaceholderShell(spec) {
   return mesh;
 }
 
-function adoptAuthoredShell(source, spec) {
+function adoptAuthoredHall(source, spec) {
   const model = source.clone(true);
   const box = new THREE.Box3().setFromObject(model);
   const size = box.getSize(new THREE.Vector3());
+  const sx = size.x > 0.01 ? spec.width / size.x : 1;
   const sy = size.y > 0.01 ? spec.height / size.y : 1;
-  const sxz = Math.max(size.x, size.z) > 0.01 ? (spec.innerRadius * 2) / Math.max(size.x, size.z) : 1;
-  model.scale.set(sxz, sy, sxz);
+  const sz = size.z > 0.01 ? spec.depth / size.z : 1;
+  model.scale.set(sx, sy, sz);
   model.updateMatrixWorld(true);
   const scaled = new THREE.Box3().setFromObject(model);
   model.position.set(
-    spec.axisX - (scaled.min.x + scaled.max.x) * 0.5,
+    spec.centerX - (scaled.min.x + scaled.max.x) * 0.5,
     spec.floorY - scaled.min.y,
-    spec.axisZ - (scaled.min.z + scaled.max.z) * 0.5
+    spec.centerZ - (scaled.min.z + scaled.max.z) * 0.5
   );
-  model.rotation.y = spec.entranceAngle;
   model.traverse((child) => {
     if (!child.isMesh) return;
     child.castShadow = false;
@@ -309,25 +490,7 @@ function adoptAuthoredShell(source, spec) {
 
 function buildShafts(spec) {
   const group = new THREE.Group();
-
-  const oculusGeo = new THREE.CylinderGeometry(
-    INTERIOR.oculusRadius * 1.1,
-    INTERIOR.oculusRadius * 3.2,
-    spec.height * 0.9,
-    INTERIOR.shaftSegments,
-    1,
-    true
-  );
-  const oculusColors = [];
-  const posAttr = oculusGeo.getAttribute('position');
-  const top = spec.height * 0.45;
-  for (let i = 0; i < posAttr.count; i++) {
-    const k = Math.max(0, Math.min(1, (posAttr.getY(i) + top) / (top * 2)));
-    _c.set(INTERIOR.colors.shaftCool).multiplyScalar(Math.pow(k, 1.6));
-    oculusColors.push(_c.r, _c.g, _c.b);
-  }
-  oculusGeo.setAttribute('color', new THREE.Float32BufferAttribute(oculusColors, 3));
-  const shaftMat = new THREE.MeshBasicMaterial({
+  const material = new THREE.MeshBasicMaterial({
     vertexColors: true,
     transparent: true,
     opacity: INTERIOR.shaftOpacity,
@@ -336,29 +499,192 @@ function buildShafts(spec) {
     side: THREE.DoubleSide,
     toneMapped: false,
   });
-  const oculus = new THREE.Mesh(oculusGeo, shaftMat);
-  oculus.position.set(spec.axisX, spec.ceilY - spec.height * 0.45, spec.axisZ);
-  oculus.frustumCulled = false;
-  group.add(oculus);
 
-  const beamLength = spec.radiusAt(spec.entranceY) * 1.9;
-  const beamGeo = new THREE.CylinderGeometry(spec.entranceRadius * 0.9, spec.entranceRadius * 2.4, beamLength, INTERIOR.shaftSegments, 1, true);
-  const beamColors = [];
-  const bAttr = beamGeo.getAttribute('position');
-  for (let i = 0; i < bAttr.count; i++) {
-    const k = Math.max(0, Math.min(1, (bAttr.getY(i) + beamLength * 0.5) / beamLength));
-    _c.set(INTERIOR.colors.shaftWarm).multiplyScalar(Math.pow(k, 1.4));
-    beamColors.push(_c.r, _c.g, _c.b);
+  const pos = [];
+  const col = [];
+  const idx = [];
+
+  function column(cx, cz, topHalfX, topHalfZ, botHalfX, botHalfZ, yTop, yBottom, color, gain) {
+    const sides = 8;
+    const top = new THREE.Color(color).multiplyScalar(gain);
+    const bottom = new THREE.Color(color).multiplyScalar(gain * 0.03);
+    const base = pos.length / 3;
+    for (let i = 0; i < sides; i++) {
+      const a = (i / sides) * Math.PI * 2;
+      pos.push(cx + Math.cos(a) * topHalfX, yTop, cz + Math.sin(a) * topHalfZ);
+      col.push(top.r, top.g, top.b);
+    }
+    for (let i = 0; i < sides; i++) {
+      const a = (i / sides) * Math.PI * 2;
+      pos.push(cx + Math.cos(a) * botHalfX, yBottom, cz + Math.sin(a) * botHalfZ);
+      col.push(bottom.r, bottom.g, bottom.b);
+    }
+    for (let i = 0; i < sides; i++) {
+      const j = (i + 1) % sides;
+      idx.push(base + i, base + j, base + sides + i, base + j, base + sides + j, base + sides + i);
+    }
   }
-  beamGeo.setAttribute('color', new THREE.Float32BufferAttribute(beamColors, 3));
-  const beam = new THREE.Mesh(beamGeo, shaftMat.clone());
-  beam.material.opacity = INTERIOR.shaftOpacity * 1.4;
-  const dir = new THREE.Vector3(Math.cos(spec.entranceAngle), -0.35, Math.sin(spec.entranceAngle)).normalize();
-  beam.position.copy(spec.entrancePos).addScaledVector(dir, -beamLength * 0.45);
-  beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().negate());
-  beam.frustumCulled = false;
-  group.add(beam);
 
+  for (const s of spec.skylights) {
+    const w = INTERIOR.skylightWidth * 0.5;
+    const d = INTERIOR.skylightDepth * 0.5;
+    const yTop = spec.ceilY - 0.2;
+    const yBot = spec.floorY + spec.height * 0.04;
+    column(s.x, s.z, w * 0.72, d * 0.72, w * 1.5, d * 1.5, yTop, yBot, INTERIOR.colors.shaftCool, 1.0);
+    column(s.x, s.z, w * 1.25, d * 1.25, w * 2.9, d * 2.9, yTop, yBot, INTERIOR.colors.shaftCool, 0.34);
+  }
+
+  const p = spec.entrancePos;
+  const n = spec.entranceNormal;
+  const reach = spec.depth * 0.55;
+  const g = spec.entranceRadius;
+  const baseIdx = pos.length / 3;
+  const warm = new THREE.Color(INTERIOR.colors.shaftWarm);
+  const faded = new THREE.Color(INTERIOR.colors.shaftWarm).multiplyScalar(0.04);
+  const tx = spec.entranceAxisZ ? 1 : 0;
+  const tz = spec.entranceAxisZ ? 0 : 1;
+  const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+  for (let i = 0; i < 4; i++) {
+    const [ux, uy] = corners[i];
+    pos.push(p.x + tx * ux * g, p.y + uy * g, p.z + tz * ux * g);
+    col.push(warm.r, warm.g, warm.b);
+  }
+  for (let i = 0; i < 4; i++) {
+    const [ux, uy] = corners[i];
+    pos.push(
+      p.x - n.x * reach + tx * ux * g * 2.4,
+      p.y + uy * g * 2.4 - reach * 0.26,
+      p.z - n.z * reach + tz * ux * g * 2.4
+    );
+    col.push(faded.r, faded.g, faded.b);
+  }
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    idx.push(baseIdx + i, baseIdx + j, baseIdx + 4 + i, baseIdx + j, baseIdx + 4 + j, baseIdx + 4 + i);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geometry.setIndex(idx);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  group.add(mesh);
+  return group;
+}
+
+function knotholeSpots(spec) {
+  const spots = [];
+  const n = Math.max(0, INTERIOR.knotCount);
+  for (let i = 0; i < n; i++) {
+    const t = (i + 0.5) / n;
+    const y = spec.floorY + spec.height * (0.28 + 0.56 * ((i * 0.37) % 1));
+    const along = -0.78 + 1.56 * ((i * 0.31 + 0.17) % 1);
+    if (i % 4 === 0) {
+      spots.push({ x: spec.centerX + along * spec.width * 0.5, y, z: spec.minZ, nx: 0, nz: 1, tx: 1, tz: 0 });
+    } else if (i % 4 === 1) {
+      spots.push({ x: spec.maxX, y, z: spec.centerZ + along * spec.depth * 0.5, nx: -1, nz: 0, tx: 0, tz: 1 });
+    } else if (i % 4 === 2) {
+      spots.push({ x: spec.centerX - along * spec.width * 0.5, y, z: spec.maxZ, nx: 0, nz: -1, tx: 1, tz: 0 });
+    } else {
+      spots.push({ x: spec.minX, y, z: spec.centerZ - along * spec.depth * 0.5, nx: 1, nz: 0, tx: 0, tz: 1 });
+    }
+    void t;
+  }
+  return spots.filter((s) => Math.hypot(s.x - spec.entrancePos.x, s.y - spec.entranceY, s.z - spec.entrancePos.z) > spec.entranceRadius * 3);
+}
+
+function buildKnotholes(spec, spots) {
+  const group = new THREE.Group();
+  const hw = INTERIOR.knotWidth * 0.5;
+  const hh = INTERIOR.knotHeight * 0.5;
+
+  const facePos = [];
+  const faceIdx = [];
+  for (const s of spots) {
+    const b = facePos.length / 3;
+    const ex = s.tx * hw;
+    const ez = s.tz * hw;
+    facePos.push(s.x - ex + s.nx * 0.05, s.y - hh, s.z - ez + s.nz * 0.05);
+    facePos.push(s.x + ex + s.nx * 0.05, s.y - hh, s.z + ez + s.nz * 0.05);
+    facePos.push(s.x + ex + s.nx * 0.05, s.y + hh, s.z + ez + s.nz * 0.05);
+    facePos.push(s.x - ex + s.nx * 0.05, s.y + hh, s.z - ez + s.nz * 0.05);
+    faceIdx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+  }
+  const faceGeo = new THREE.BufferGeometry();
+  faceGeo.setAttribute('position', new THREE.Float32BufferAttribute(facePos, 3));
+  faceGeo.setIndex(faceIdx);
+  const faces = new THREE.Mesh(
+    faceGeo,
+    new THREE.MeshBasicMaterial({ color: INTERIOR.colors.knot, side: THREE.DoubleSide, toneMapped: false })
+  );
+  faces.frustumCulled = false;
+  group.add(faces);
+
+  const pos = [];
+  const col = [];
+  const idx = [];
+  const near = new THREE.Color(INTERIOR.colors.knot);
+  const far = new THREE.Color(INTERIOR.colors.knot).multiplyScalar(0.02);
+  const L = INTERIOR.knotBeamLength;
+  const spread = INTERIOR.knotBeamSpread;
+  for (const s of spots) {
+    const b = pos.length / 3;
+    const ring = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    for (const [u, v] of ring) {
+      pos.push(s.x + s.tx * u * hw, s.y + v * hh, s.z + s.tz * u * hw);
+      col.push(near.r, near.g, near.b);
+    }
+    for (const [u, v] of ring) {
+      pos.push(
+        s.x + s.nx * L + s.tx * u * hw * spread,
+        s.y + v * hh * spread - L * 0.3,
+        s.z + s.nz * L + s.tz * u * hw * spread
+      );
+      col.push(far.r, far.g, far.b);
+    }
+    for (let i = 0; i < 4; i++) {
+      const j = (i + 1) % 4;
+      idx.push(b + i, b + j, b + 4 + i, b + j, b + 4 + j, b + 4 + i);
+    }
+  }
+  const beamGeo = new THREE.BufferGeometry();
+  beamGeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  beamGeo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  beamGeo.setIndex(idx);
+  const beams = new THREE.Mesh(
+    beamGeo,
+    new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: INTERIOR.knotBeamOpacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    })
+  );
+  beams.frustumCulled = false;
+  group.add(beams);
+  return group;
+}
+
+function buildPools(spec) {
+  const group = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({ color: INTERIOR.colors.pool, toneMapped: false, transparent: true, opacity: 0.85 });
+  for (let i = 0; i < INTERIOR.poolCount; i++) {
+    const a = (i / INTERIOR.poolCount) * Math.PI * 2 + 0.7;
+    const geo = new THREE.CircleGeometry(INTERIOR.poolRadius * (0.6 + (i % 3) * 0.24), 12);
+    geo.rotateX(-Math.PI / 2);
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.position.set(
+      spec.centerX + Math.cos(a) * spec.width * 0.28,
+      spec.floorY + 0.06,
+      spec.centerZ + Math.sin(a) * spec.depth * 0.28
+    );
+    mesh.name = 'hollow_pools';
+    group.add(mesh);
+  }
   return group;
 }
 
@@ -385,12 +711,9 @@ function buildDust(spec) {
   const positions = new Float32Array(count * 3);
   const seeds = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
-    const a = Math.random() * Math.PI * 2;
-    const y = spec.floorY + Math.random() * spec.height;
-    const r = spec.radiusAt(y) * Math.sqrt(Math.random()) * 0.92;
-    positions[i * 3] = spec.axisX + Math.cos(a) * r;
-    positions[i * 3 + 1] = y;
-    positions[i * 3 + 2] = spec.axisZ + Math.sin(a) * r;
+    positions[i * 3] = lerp(spec.minX + 1, spec.maxX - 1, Math.random());
+    positions[i * 3 + 1] = spec.floorY + Math.random() * spec.height;
+    positions[i * 3 + 2] = lerp(spec.minZ + 1, spec.maxZ - 1, Math.random());
     seeds[i * 3] = Math.random() * Math.PI * 2;
     seeds[i * 3 + 1] = 0.4 + Math.random() * 1.4;
     seeds[i * 3 + 2] = Math.random() * Math.PI * 2;
@@ -420,56 +743,160 @@ function buildDust(spec) {
 
 function buildLights(spec) {
   const lights = [];
-  const entrance = new THREE.PointLight(INTERIOR.entranceLightColor, INTERIOR.entranceLightIntensity, INTERIOR.entranceLightRange, 1.6);
-  entrance.position.copy(spec.entrancePos).lerp(new THREE.Vector3(spec.axisX, spec.entranceY, spec.axisZ), 0.28);
+  const entrance = new THREE.PointLight(INTERIOR.entranceLightColor, INTERIOR.entranceLightIntensity, INTERIOR.entranceLightRange, 1.5);
+  entrance.position.copy(spec.entrancePos).addScaledVector(spec.entranceNormal, -INTERIOR.throatLength * 1.6);
   lights.push(entrance);
 
-  const oculus = new THREE.PointLight(INTERIOR.oculusLightColor, INTERIOR.oculusLightIntensity, INTERIOR.oculusLightRange, 1.4);
-  oculus.position.set(spec.axisX, spec.ceilY - spec.height * 0.06, spec.axisZ);
-  lights.push(oculus);
+  for (const s of spec.skylights) {
+    const light = new THREE.PointLight(INTERIOR.skylightLightColor, INTERIOR.skylightLightIntensity, INTERIOR.skylightLightRange, 1.4);
+    light.position.set(s.x, spec.ceilY - spec.height * 0.08, s.z);
+    lights.push(light);
+  }
 
-  const crown = new THREE.PointLight(INTERIOR.crownLightColor, INTERIOR.crownLightIntensity, INTERIOR.crownLightRange, 1.6);
-  crown.position.set(spec.axisX, spec.entranceY + (spec.ceilY - spec.entranceY) * INTERIOR.crownAt, spec.axisZ);
+  const crown = new THREE.PointLight(INTERIOR.crownLightColor, INTERIOR.crownLightIntensity, INTERIOR.crownLightRange, 1.5);
+  crown.position.set(spec.centerX, spec.floorY + spec.height * 0.62, spec.centerZ);
   lights.push(crown);
 
-  const basin = new THREE.PointLight(INTERIOR.basinLightColor, INTERIOR.basinLightIntensity, INTERIOR.basinLightRange, 1.8);
-  basin.position.set(spec.axisX, spec.floorY + 1.2, spec.axisZ);
+  const basin = new THREE.PointLight(INTERIOR.basinLightColor, INTERIOR.basinLightIntensity, INTERIOR.basinLightRange, 1.7);
+  basin.position.set(spec.centerX, spec.floorY + 2.2, spec.centerZ);
   lights.push(basin);
 
   const ambient = new THREE.AmbientLight(INTERIOR.ambientColor, INTERIOR.ambientIntensity);
-  return { lights, ambient };
+  const hemi = new THREE.HemisphereLight(INTERIOR.hemiSkyColor, INTERIOR.hemiGroundColor, INTERIOR.hemiIntensity);
+  hemi.position.set(spec.centerX, spec.ceilY, spec.centerZ);
+  return { lights, ambient, hemi };
+}
+
+function box(minX, minY, minZ, maxX, maxY, maxZ) {
+  return {
+    min: new THREE.Vector3(minX, minY, minZ),
+    max: new THREE.Vector3(maxX, maxY, maxZ),
+  };
+}
+
+function buildShellColliders(spec, ledges) {
+  const t = INTERIOR.wallThickness;
+  const list = [];
+  const x0 = spec.minX - t;
+  const x1 = spec.maxX + t;
+  const z0 = spec.minZ - t;
+  const z1 = spec.maxZ + t;
+  const y0 = spec.floorY - t;
+  const y1 = spec.ceilY + t;
+
+  list.push(box(x0, y0, z0, x1, spec.floorY, z1));
+  list.push(box(x0, spec.ceilY, z0, x1, y1, z1));
+
+  const g = spec.entranceRadius;
+  const p = spec.entrancePos;
+  const onZ = spec.entranceAxisZ;
+
+  function wallZ(zInner, zOuter, holed) {
+    const zi = Math.min(zInner, zOuter);
+    const za = Math.max(zInner, zOuter);
+    if (!holed) {
+      list.push(box(x0, y0, zi, x1, y1, za));
+      return;
+    }
+    list.push(box(x0, y0, zi, p.x - g, y1, za));
+    list.push(box(p.x + g, y0, zi, x1, y1, za));
+    list.push(box(p.x - g, y0, zi, p.x + g, p.y - g, za));
+    list.push(box(p.x - g, p.y + g, zi, p.x + g, y1, za));
+  }
+
+  function wallX(xInner, xOuter, holed) {
+    const xi = Math.min(xInner, xOuter);
+    const xa = Math.max(xInner, xOuter);
+    if (!holed) {
+      list.push(box(xi, y0, z0, xa, y1, z1));
+      return;
+    }
+    list.push(box(xi, y0, z0, xa, y1, p.z - g));
+    list.push(box(xi, y0, p.z + g, xa, y1, z1));
+    list.push(box(xi, y0, p.z - g, xa, p.y - g, p.z + g));
+    list.push(box(xi, p.y + g, p.z - g, xa, y1, p.z + g));
+  }
+
+  wallZ(spec.maxZ, z1, onZ && spec.entranceSign > 0);
+  wallZ(z0, spec.minZ, onZ && spec.entranceSign < 0);
+  wallX(spec.maxX, x1, !onZ && spec.entranceSign > 0);
+  wallX(x0, spec.minX, !onZ && spec.entranceSign < 0);
+
+  for (const b of ledges) list.push({ min: b.min.clone(), max: b.max.clone() });
+  return list;
+}
+
+function buildTrunkColliders(spec) {
+  const list = [];
+  const r = HIVE.trunkRadiusBase * HIVE.colliderRadius;
+  const top = spec.baseY + HIVE.trunkHeight;
+  const bottom = spec.baseY - 1;
+  const g = spec.entranceRadius;
+  const p = spec.entrancePos;
+  const x0 = spec.axisX - r;
+  const x1 = spec.axisX + r;
+  const z0 = spec.axisZ - r;
+  const z1 = spec.axisZ + r;
+
+  if (spec.entranceAxisZ) {
+    list.push(box(x0, bottom, z0, Math.min(x1, p.x - g), top, z1));
+    list.push(box(Math.max(x0, p.x + g), bottom, z0, x1, top, z1));
+    list.push(box(Math.max(x0, p.x - g), bottom, z0, Math.min(x1, p.x + g), p.y - g, z1));
+    list.push(box(Math.max(x0, p.x - g), p.y + g, z0, Math.min(x1, p.x + g), top, z1));
+  } else {
+    list.push(box(x0, bottom, z0, x1, top, Math.min(z1, p.z - g)));
+    list.push(box(x0, bottom, Math.max(z0, p.z + g), x1, top, z1));
+    list.push(box(x0, bottom, Math.max(z0, p.z - g), x1, p.y - g, Math.min(z1, p.z + g)));
+    list.push(box(x0, p.y + g, Math.max(z0, p.z - g), x1, top, Math.min(z1, p.z + g)));
+  }
+
+  const rr = HIVE.trunkRadiusBase * HIVE.rootColliderRadius;
+  list.push(box(spec.axisX - rr, bottom, spec.axisZ - rr, spec.axisX + rr, spec.baseY + HIVE.rootHeight * 0.6, spec.axisZ + rr));
+
+  return list.filter((b) => b.max.x - b.min.x > 0.05 && b.max.z - b.min.z > 0.05 && b.max.y - b.min.y > 0.05);
 }
 
 export function createInterior(scene, hive, assets, terrain) {
   const spec = buildSpec(hive, terrain);
+  spec.knots = knotholeSpots(spec);
   const group = new THREE.Group();
   group.name = 'hollow';
   group.visible = false;
   scene.add(group);
 
+  const ledges = galleryBoxes(spec).concat(alcoveBoxes(spec), pillarBoxes(spec), [landingBox(spec)]);
+
   const authored = assets && typeof assets.get === 'function' ? assets.get(INTERIOR.model) : null;
-  const shell = authored ? adoptAuthoredShell(authored, spec) : buildPlaceholderShell(spec);
+  const shell = authored ? adoptAuthoredHall(authored, spec) : PLACEHOLDER_hallShell(spec, ledges);
   group.add(shell);
 
-  const shafts = buildShafts(spec);
-  group.add(shafts);
+  group.add(buildShafts(spec));
+  group.add(buildKnotholes(spec, spec.knots));
+  group.add(buildPools(spec));
 
   const dust = buildDust(spec);
   group.add(dust);
 
-  const { lights, ambient } = buildLights(spec);
+  const { lights, ambient, hemi } = buildLights(spec);
   const lightGroup = new THREE.Group();
   lightGroup.name = 'hollow_lights';
   for (const light of lights) lightGroup.add(light);
   lightGroup.add(ambient);
+  lightGroup.add(hemi);
   const baseIntensity = lights.map((l) => l.intensity);
   const baseAmbient = ambient.intensity;
+  const baseHemi = hemi.intensity;
 
-  const clipPlane = new THREE.Plane(
-    new THREE.Vector3(-Math.cos(spec.entranceAngle), 0, -Math.sin(spec.entranceAngle)),
-    0
-  );
-  clipPlane.constant = -clipPlane.normal.dot(spec.entrancePos) + INTERIOR.throatLength * 0.35;
+  const n = spec.entranceNormal;
+  const tangent = new THREE.Vector3(spec.entranceAxisZ ? 1 : 0, 0, spec.entranceAxisZ ? 0 : 1);
+  const up = new THREE.Vector3(0, 1, 0);
+  const clipPlanes = [
+    new THREE.Plane(n.clone().negate(), n.dot(spec.entrancePos) + INTERIOR.throatLength * 0.35),
+    new THREE.Plane(tangent.clone().negate(), tangent.dot(spec.entrancePos) + spec.clipHalf),
+    new THREE.Plane(tangent.clone(), spec.clipHalf - tangent.dot(spec.entrancePos)),
+    new THREE.Plane(up.clone().negate(), spec.entranceY + spec.clipHalf),
+    new THREE.Plane(up.clone(), spec.clipHalf - spec.entranceY),
+  ];
 
   const clipped = [];
   shell.traverse((child) => {
@@ -488,102 +915,58 @@ export function createInterior(scene, hive, assets, terrain) {
     });
   }
 
-  const colliders = [];
-  function buildColliders() {
-    const rings = INTERIOR.collisionRings;
-    const segs = INTERIOR.collisionSegments;
-    const dy = spec.height / rings;
-    const gapScale = spec.oversized ? 1.6 : 1.0;
-    for (let r = 0; r < rings; r++) {
-      const y0 = spec.floorY + r * dy;
-      const y1 = y0 + dy;
-      const ym = (y0 + y1) * 0.5;
-      const rIn = spec.radiusAt(ym);
-      const rOut = spec.outerRadiusAt(ym);
-      for (let s = 0; s < segs; s++) {
-        const a0 = (s / segs) * Math.PI * 2;
-        const a1 = ((s + 1) / segs) * Math.PI * 2;
-        const am = (a0 + a1) * 0.5;
-        let d = (am - spec.entranceAngle) % (Math.PI * 2);
-        if (d > Math.PI) d -= Math.PI * 2;
-        if (d < -Math.PI) d += Math.PI * 2;
-        const inGap =
-          Math.abs(d) < INTERIOR.gapAngle * gapScale &&
-          Math.abs(ym - spec.entranceY) < INTERIOR.gapHeight * gapScale;
-        if (inGap) continue;
-        let minX = Infinity;
-        let maxX = -Infinity;
-        let minZ = Infinity;
-        let maxZ = -Infinity;
-        for (let i = 0; i < 4; i++) {
-          const a = i < 2 ? a0 : a1;
-          const rr = i % 2 === 0 ? rIn : rOut;
-          const x = spec.axisX + Math.cos(a) * rr;
-          const z = spec.axisZ + Math.sin(a) * rr;
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (z < minZ) minZ = z;
-          if (z > maxZ) maxZ = z;
-        }
-        colliders.push({
-          min: new THREE.Vector3(minX, y0 - 0.02, minZ),
-          max: new THREE.Vector3(maxX, y1 + 0.02, maxZ),
-        });
-      }
-    }
-    const capY = spec.ceilY;
-    for (let s = 0; s < segs; s++) {
-      const a0 = (s / segs) * Math.PI * 2;
-      const a1 = ((s + 1) / segs) * Math.PI * 2;
-      let minX = Infinity;
-      let maxX = -Infinity;
-      let minZ = Infinity;
-      let maxZ = -Infinity;
-      for (let i = 0; i < 4; i++) {
-        const a = i < 2 ? a0 : a1;
-        const rr = i % 2 === 0 ? INTERIOR.oculusRadius * 1.15 : spec.radiusAt(capY) + INTERIOR.wallThickness;
-        const x = spec.axisX + Math.cos(a) * rr;
-        const z = spec.axisZ + Math.sin(a) * rr;
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (z < minZ) minZ = z;
-        if (z > maxZ) maxZ = z;
-      }
-      colliders.push({
-        min: new THREE.Vector3(minX, capY, minZ),
-        max: new THREE.Vector3(maxX, capY + 1.2, maxZ),
-      });
-    }
-  }
-  buildColliders();
+  const hallColliders = buildShellColliders(spec, ledges);
+  const trunkColliders = buildTrunkColliders(spec);
+  let colliderTarget = null;
+  let solidInside = null;
 
   function attachColliders(target) {
     if (!target || !Array.isArray(target.colliders)) return 0;
+    colliderTarget = target;
     const list = target.colliders;
     let removed = 0;
-    const reach = spec.innerRadius + INTERIOR.wallThickness * 2;
+    const reach = HIVE.trunkRadiusBase * HIVE.rootColliderRadius + 1;
     for (let i = list.length - 1; i >= 0; i--) {
-      const box = list[i] && (list[i].min ? list[i] : list[i].box || list[i].aabb);
-      if (!box || !box.min) continue;
-      const cx = (box.min.x + box.max.x) * 0.5;
-      const cz = (box.min.z + box.max.z) * 0.5;
-      const overlapsShaft = box.max.y > spec.floorY && box.min.y < spec.ceilY;
-      if (overlapsShaft && Math.hypot(cx - spec.axisX, cz - spec.axisZ) < reach) {
+      const b = list[i] && (list[i].min ? list[i] : list[i].box || list[i].aabb);
+      if (!b || !b.min) continue;
+      const cx = (b.min.x + b.max.x) * 0.5;
+      const cz = (b.min.z + b.max.z) * 0.5;
+      const overlaps = b.max.y > spec.floorY && b.min.y < spec.ceilY;
+      if (overlaps && Math.hypot(cx - spec.axisX, cz - spec.axisZ) < reach) {
         list.splice(i, 1);
         removed++;
       }
     }
-    for (const c of colliders) list.push(c);
+    setSolid(false);
     return removed;
   }
 
+  function setSolid(inside) {
+    if (!colliderTarget || inside === solidInside) return;
+    const list = colliderTarget.colliders;
+    const drop = solidInside === true ? hallColliders : trunkColliders;
+    if (solidInside !== null) {
+      for (const c of drop) {
+        const i = list.indexOf(c);
+        if (i >= 0) list.splice(i, 1);
+      }
+    }
+    solidInside = inside;
+    const add = inside ? hallColliders : trunkColliders;
+    for (const c of add) list.push(c);
+  }
+
   const grid = createHexGrid({
-    axisX: spec.axisX,
-    axisZ: spec.axisZ,
+    minX: spec.minX,
+    maxX: spec.maxX,
+    minZ: spec.minZ,
+    maxZ: spec.maxZ,
     floorY: spec.floorY,
     ceilY: spec.ceilY,
-    refRadius: spec.innerRadius,
-    radiusAt: spec.radiusAt,
+    entranceWall: spec.entranceWall,
+    entranceS: spec.entranceS,
+    entranceY: spec.entranceY,
+    entranceRadius: spec.entranceRadius,
   });
 
   let clipActive = false;
@@ -592,7 +975,7 @@ export function createInterior(scene, hive, assets, terrain) {
     if (active === clipActive) return;
     clipActive = active;
     for (const mat of clipped) {
-      mat.clippingPlanes = active ? [clipPlane] : null;
+      mat.clippingPlanes = active ? clipPlanes : null;
       mat.needsUpdate = true;
     }
   }
@@ -605,24 +988,28 @@ export function createInterior(scene, hive, assets, terrain) {
   function setIntensity(k) {
     for (let i = 0; i < lights.length; i++) lights[i].intensity = baseIntensity[i] * k;
     ambient.intensity = baseAmbient * k;
-  }
-
-  function radialDistance(point) {
-    return Math.hypot(point.x - spec.axisX, point.z - spec.axisZ);
+    hemi.intensity = baseHemi * k;
   }
 
   function clampCamera(camera, insideness) {
     if (insideness <= 0.02) return;
-    const y = Math.min(Math.max(camera.position.y, spec.floorY + 0.5), spec.ceilY - 0.5);
-    const limit = Math.max(1.5, spec.radiusAt(y) - INTERIOR.cameraMargin);
-    const dx = camera.position.x - spec.axisX;
-    const dz = camera.position.z - spec.axisZ;
-    const d = Math.hypot(dx, dz);
-    const targetX = d > limit ? spec.axisX + (dx / d) * limit : camera.position.x;
-    const targetZ = d > limit ? spec.axisZ + (dz / d) * limit : camera.position.z;
-    camera.position.x += (targetX - camera.position.x) * insideness;
-    camera.position.z += (targetZ - camera.position.z) * insideness;
-    camera.position.y += (y - camera.position.y) * insideness;
+    const m = INTERIOR.cameraMargin;
+    const inAperture =
+      Math.abs(camera.position.y - spec.entranceY) < spec.entranceRadius * 2 &&
+      (spec.entranceAxisZ
+        ? Math.abs(camera.position.x - spec.entrancePos.x) < spec.entranceRadius * 2
+        : Math.abs(camera.position.z - spec.entrancePos.z) < spec.entranceRadius * 2);
+
+    let tx = Math.min(Math.max(camera.position.x, spec.minX + m), spec.maxX - m);
+    let ty = Math.min(Math.max(camera.position.y, spec.floorY + m), spec.ceilY - m);
+    let tz = Math.min(Math.max(camera.position.z, spec.minZ + m), spec.maxZ - m);
+    if (inAperture) {
+      if (spec.entranceAxisZ) tz = camera.position.z;
+      else tx = camera.position.x;
+    }
+    camera.position.x += (tx - camera.position.x) * insideness;
+    camera.position.y += (ty - camera.position.y) * insideness;
+    camera.position.z += (tz - camera.position.z) * insideness;
   }
 
   let clock = 0;
@@ -646,6 +1033,10 @@ export function createInterior(scene, hive, assets, terrain) {
     dustPos.needsUpdate = true;
   }
 
+  if (spec.oversized) {
+    console.info('[interior] the hall is wider than the trunk — concealed by inside-only rendering and entrance clipping');
+  }
+
   return {
     group,
     spec,
@@ -654,13 +1045,16 @@ export function createInterior(scene, hive, assets, terrain) {
     lights,
     ambient,
     plugs,
-    colliders,
+    ledges,
+    hallColliders,
+    trunkColliders,
     attachColliders,
+    setSolid,
     setLightsActive,
     setIntensity,
     setClipped,
     clampCamera,
-    radialDistance,
+    insideDepth: spec.insideDepth,
     update,
     authored: Boolean(authored),
     dispose() {

@@ -438,15 +438,16 @@ export function createHive(scene, terrain, assets) {
       child.castShadow = true;
       child.receiveShadow = true;
     });
-    const anchor = findNode(root, HIVE.entranceAnchor);
-    if (anchor) {
-      const world = anchor.getWorldPosition(new THREE.Vector3());
-      entranceHeight = world.y - group.position.y;
-      entranceSurface = Math.hypot(world.x - group.position.x, world.z - group.position.z);
-    }
     const node = findNode(root, HIVE.canopyNode);
     if (node) canopy = node;
     group.add(root);
+    group.updateMatrixWorld(true);
+    const anchor = findNode(root, HIVE.entranceAnchor);
+    if (anchor) {
+      const local = group.worldToLocal(anchor.getWorldPosition(new THREE.Vector3()));
+      entranceHeight = local.y;
+      entranceSurface = Math.hypot(local.x, local.z);
+    }
   }
 
   if (authored) adoptTree(authored);

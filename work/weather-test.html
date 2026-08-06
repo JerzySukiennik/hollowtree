@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<!-- Hollowtree — standalone weather harness: cycles all six states against the real sky/terrain/grass and self-reports cost. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hollowtree — weather test</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #140f06; }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #f6e9cf; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #report {
+    position: fixed; left: 12px; top: 12px; z-index: 5; max-height: 92vh; overflow: auto;
+    font-size: 11px; line-height: 1.55; white-space: pre; letter-spacing: .02em;
+    background: rgba(18,13,6,.72); border: 1px solid rgba(246,201,90,.18);
+    padding: 10px 14px; border-radius: 4px; text-shadow: 0 1px 3px rgba(0,0,0,.8);
+  }
+  #now { position: fixed; right: 14px; top: 12px; z-index: 5; font-size: 12px; letter-spacing: .16em; text-transform: uppercase; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="app"></canvas>
+<pre id="report">booting…</pre>
+<div id="now"></div>
+<script type="module">
+import * as THREE from 'three';
+import { createTerrain } from '../src/world/terrain.js';
+import { createSky } from '../src/world/sky.js';
+import { createGrass } from '../src/world/grass.js';
+import { createWeather } from '../src/world/weather.js';
+import { WEATHER } from '../src/config.weather.js';
+
+const params = new URLSearchParams(location.search);
+const HOLD = Number(params.get('hold') || 2.6);
+const TRANSITION = Number(params.get('transition') || 1200);
+const QUALITY = params.get('quality') || 'high';
+const WITH_GRASS = params.get('grass') !== '0';
+
+const reportEl = document.getElementById('report');
+const nowEl = document.getElementById('now');
+const canvas = document.getElementById('app');
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+renderer.setSize(window.innerWidth, window.innerHeight, false);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.06;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 800);
+
+const terrain = createTerrain(scene);
+const sky = createSky(scene, renderer);
+const grass = WITH_GRASS ? createGrass(scene, terrain) : null;
+const weather = createWeather(scene, camera, terrain, sky, { grass, quality: QUALITY });
+
+const probe = createWeather(new THREE.Scene(), null, { getHeight: () => 0 }, null, { quality: 'low' });
+
+const kinds = WEATHER.kinds;
+const results = [];
+let stateIndex = -1;
+let stateStart = 0;
+let acc = null;
+let seed = 20260806;
+let started = 0;
+
+function beginState(index, nowMs) {
+  stateIndex = index;
+  stateStart = nowMs;
+  acc = { kind: kinds[index], frames: 0, weatherMs: 0, weatherPeak: 0, frameMs: 0, calls: 0, tris: 0, rain: 0, splash: 0, fogLayers: 0, lightning: 0, wind: 0, wet: 0 };
+  weather.setFromWorld({
+    kind: kinds[index],
+    intensity: 1,
+    seed,
+    startedAt: nowMs,
+    durationMs: 3600000,
+    transitionMs: TRANSITION,
+  });
+}
+
+function determinism() {
+  const lines = [];
+  const base = Date.now();
+  const a = createWeather(new THREE.Scene(), null, { getHeight: () => 0 }, null, {});
+  const b = createWeather(new THREE.Scene(), null, { getHeight: () => 0 }, null, {});
+  const payload = { kind: 'storm', intensity: 0.8, seed: 12345, startedAt: base, durationMs: 480000 };
+  a.setFromWorld(payload);
+  b.setFromWorld(payload);
+  let mismatch = 0;
+  let seen = new Set();
+  for (let i = 0; i < 240; i++) {
+    const t = base + i * 60000;
+    const sa = a.sample(t);
+    const sb = b.sample(t);
+    seen.add(sa.kind);
+    if (sa.kind !== sb.kind || Math.abs(sa.intensity - sb.intensity) > 1e-9 ||
+        Math.abs(sa.wind.strength - sb.wind.strength) > 1e-9 ||
+        Math.abs(sa.wind.dirX - sb.wind.dirX) > 1e-9) mismatch++;
+  }
+  lines.push(`determinism   two instances, seed 12345, 240 samples over 4 h → ${mismatch === 0 ? 'IDENTICAL' : mismatch + ' MISMATCHES'}`);
+  lines.push(`schedule      kinds visited in 4 h: ${[...seen].join(' ')}`);
+  a.dispose();
+  b.dispose();
+  return lines;
+}
+
+function indoorCheck() {
+  const p = new THREE.Vector3(3, 5, 7);
+  probe.setFromWorld({ kind: 'storm', intensity: 1, seed: 9, startedAt: Date.now(), durationMs: 3600000, transitionMs: 1 });
+  const spin = performance.now();
+  while (performance.now() - spin < 4);
+  probe.update(0.016, 0, p);
+  const out = [];
+  for (const v of [0, 0.3, 0.6, 1, 0]) {
+    probe.setIndoor(v);
+    probe.update(0.016, 0, p);
+    const c = probe.counts;
+    out.push(`${v}→rain ${c.rain}/splash ${c.splash}/fog ${c.fogLayers}/wind ${probe.windAt(p).length().toFixed(2)}`);
+  }
+  return `indoor        ${out.join('  ')}`;
+}
+
+function heapProbe() {
+  if (!performance.memory) return 'allocation   performance.memory unavailable (run in Chrome for the heap check)';
+  const p = new THREE.Vector3(3, 5, 7);
+  probe.update(0.016, 0, p);
+  const before = performance.memory.usedJSHeapSize;
+  for (let i = 0; i < 2000; i++) {
+    probe.update(0.016, i * 0.016, p);
+    probe.windAt(p);
+  }
+  const after = performance.memory.usedJSHeapSize;
+  const delta = after - before;
+  return `allocation   2000 update()+windAt() calls → heap delta ${(delta / 1024).toFixed(1)} KB ${delta < 65536 ? '(no per-frame allocation)' : '(CHECK)'}`;
+}
+
+function fmt(n, d = 2) { return n.toFixed(d).padStart(d === 0 ? 5 : 6); }
+
+function writeReport(done) {
+  const lines = [];
+  lines.push('HOLLOWTREE — WEATHER SYSTEM SELF-TEST');
+  lines.push(`quality ${weather.quality}   grass ${WITH_GRASS ? 'on (62k blades)' : 'off'}   pixelRatio ${renderer.getPixelRatio().toFixed(2)}   ${window.innerWidth}x${window.innerHeight}`);
+  lines.push('');
+  lines.push('state       upd ms  peak   frame ms   fps   draws   tris     rain  splash  fog  wind m/s  wet');
+  for (const r of results) {
+    lines.push(
+      r.kind.padEnd(10) +
+      fmt(r.weatherMs) + '  ' + fmt(r.weatherPeak) + ' ' +
+      fmt(r.frameMs) + '  ' + fmt(1000 / r.frameMs, 0) + '  ' +
+      String(r.calls).padStart(5) + '  ' + String(r.tris).padStart(7) + '  ' +
+      String(r.rain).padStart(6) + '  ' + String(r.splash).padStart(5) + '  ' +
+      String(r.fogLayers).padStart(3) + '  ' + fmt(r.wind) + '  ' + fmt(r.wet)
+    );
+  }
+  if (done) {
+    const clear = results.find((r) => r.kind === 'clear');
+    lines.push('');
+    for (const r of results) {
+      if (!clear) break;
+      lines.push(`delta vs clear  ${r.kind.padEnd(9)} +${r.calls - clear.calls} draws  +${r.tris - clear.tris} tris`);
+    }
+    lines.push('');
+    lines.push(`weather update cost  avg ${fmt(results.reduce((s, r) => s + r.weatherMs, 0) / results.length)} ms/frame   worst ${fmt(Math.max(...results.map((r) => r.weatherPeak)))} ms`);
+    lines.push('');
+    lines.push(`grass wind    driven through ${weather.windPatched}`);
+    lines.push(indoorCheck());
+    for (const l of determinism()) lines.push(l);
+    lines.push(heapProbe());
+    lines.push('');
+    lines.push('DONE');
+    window.__weatherReport = lines.join('\n');
+    document.title = 'weather-test: done';
+  }
+  reportEl.textContent = lines.join('\n');
+}
+
+let last = performance.now();
+let elapsed = 0;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  elapsed += dt;
+  const wall = Date.now();
+  if (!started) { started = wall; beginState(0, wall); }
+
+  const angle = elapsed * 0.16;
+  const r = 26;
+  const cx = Math.cos(angle) * r;
+  const cz = Math.sin(angle) * r;
+  camera.position.set(cx, terrain.getHeight(cx, cz) + 3.4, cz);
+  camera.lookAt(Math.cos(angle + 0.9) * (r + 40), terrain.getHeight(0, 0) + 7, Math.sin(angle + 0.9) * (r + 40));
+
+  sky.update(dt, camera.position, elapsed);
+  if (grass) grass.update(dt, camera.position);
+
+  const t0 = performance.now();
+  weather.update(dt, elapsed, camera.position);
+  const t1 = performance.now();
+
+  renderer.render(scene, camera);
+  const t2 = performance.now();
+
+  const settled = wall - stateStart > TRANSITION + 200;
+  if (acc && settled) {
+    const c = weather.counts;
+    acc.frames++;
+    acc.weatherMs += t1 - t0;
+    acc.weatherPeak = Math.max(acc.weatherPeak, t1 - t0);
+    acc.frameMs += t2 - t0;
+    acc.calls = renderer.info.render.calls;
+    acc.tris = renderer.info.render.triangles;
+    acc.rain = Math.max(acc.rain, c.rain);
+    acc.splash = Math.max(acc.splash, c.splash);
+    acc.fogLayers = Math.max(acc.fogLayers, c.fogLayers);
+    acc.lightning = Math.max(acc.lightning, weather.state.lightning);
+    acc.wind = weather.state.wind.strength;
+    acc.wet = weather.state.wetness;
+  }
+
+  nowEl.textContent = `${weather.state.kind}  wind ${weather.state.wind.strength.toFixed(1)}  wet ${weather.state.wetness.toFixed(2)}  flash ${weather.state.lightning.toFixed(2)}`;
+
+  if (acc && wall - stateStart > (HOLD * 1000 + TRANSITION)) {
+    if (acc.frames > 0) {
+      results.push({
+        kind: acc.kind,
+        weatherMs: acc.weatherMs / acc.frames,
+        weatherPeak: acc.weatherPeak,
+        frameMs: acc.frameMs / acc.frames,
+        calls: acc.calls,
+        tris: acc.tris,
+        rain: acc.rain,
+        splash: acc.splash,
+        fogLayers: acc.fogLayers,
+        lightning: acc.lightning,
+        wind: acc.wind,
+        wet: acc.wet,
+      });
+    }
+    if (stateIndex + 1 < kinds.length) {
+      beginState(stateIndex + 1, wall);
+      writeReport(false);
+    } else {
+      acc = null;
+      writeReport(true);
+    }
+  } else if (acc && acc.frames % 30 === 1) {
+    writeReport(false);
+  }
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+});
+
+window.hollowtreeWeather = { weather, sky, terrain, grass, renderer, scene, camera };
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

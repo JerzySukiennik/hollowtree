@@ -1,4 +1,4 @@
-// Hollowtree — the entrance transition: one insideness scalar from the queen's position, crossfading fog, light, background and world detail visibility.
+// Hollowtree — the entrance transition: one insideness scalar from the queen's position in the hall, crossfading fog, light, background, collision set and world detail visibility.
 
 import * as THREE from 'three';
 import { INTERIOR, PALETTE, WORLD } from '../config.js';
@@ -30,22 +30,20 @@ export function createPortal(scene, interior, flight, detail) {
     insideness: 0,
     target: 0,
     inside: false,
+    latched: false,
     detailHidden: false,
+    solid: false,
   };
 
   const listeners = { enter: [], exit: [] };
 
   function sample(point) {
-    const y = point.y;
-    if (y < spec.floorY - 2 || y > spec.ceilY + 2) return 0;
-    const band =
-      smoothstep(spec.floorY - 2, spec.floorY + 1.5, y) *
-      (1 - smoothstep(spec.ceilY - 1.5, spec.ceilY + 2, y));
-    const radial = Math.hypot(point.x - spec.axisX, point.z - spec.axisZ);
-    const inner = spec.radiusAt(Math.min(spec.ceilY, Math.max(spec.floorY, y)));
-    const outer = spec.outerRadiusAt(Math.min(spec.ceilY, Math.max(spec.floorY, y)));
-    const depth = 1 - smoothstep(inner - INTERIOR.insideMargin, outer + INTERIOR.insideMargin, radial);
-    return band * depth;
+    if (spec.inAperture(point)) {
+      state.latched = spec.beyondEntranceWall(point);
+      return smoothstep(INTERIOR.throatLength, -INTERIOR.insideMargin, spec.outward(point));
+    }
+    if (state.latched && spec.insideDepth(point) < -INTERIOR.insideMargin) state.latched = false;
+    return state.latched ? 1 : 0;
   }
 
   function setDetailVisible(visible) {
@@ -74,6 +72,9 @@ export function createPortal(scene, interior, flight, detail) {
     const wasInside = state.inside;
     state.inside = k > 0.5;
     if (state.inside !== wasInside) emit(state.inside ? 'enter' : 'exit');
+
+    state.solid = state.latched;
+    interior.setSolid(state.solid);
 
     interior.group.visible = k > 0;
     interior.setLightsActive(k > 0);
@@ -116,6 +117,7 @@ export function createPortal(scene, interior, flight, detail) {
     },
     dispose() {
       setDetailVisible(true);
+      interior.setSolid(false);
       if (scene.fog) {
         scene.fog.color.copy(_outFog);
         if (exp2) scene.fog.density = outFogDensity;

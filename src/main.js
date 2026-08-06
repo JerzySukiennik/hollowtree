@@ -1,13 +1,17 @@
 // Hollowtree — bootstrap: renderer, scene, module wiring and the frame loop.
 
 import * as THREE from 'three';
-import { CAMERA, RENDER, WORLD, PALETTE, FLIGHT, DEV } from './config.js';
+import { CAMERA, RENDER, WORLD, PALETTE, FLIGHT, DEV, MENU, HIVE } from './config.js';
 import { createLoop } from './core/loop.js';
 import { input, initInput } from './core/input.js';
 import { loadAssets } from './core/assets.js';
 import { createResources } from './systems/resources.js';
 import { createGather } from './systems/gather.js';
 import { createHud as createGameHud } from './ui/hud.js';
+import { createMenu } from './ui/menu.js';
+import { createLobby } from './ui/lobby.js';
+import { createAudio } from './audio/index.js';
+import { createNet } from './net/index.js';
 
 const canvas = document.getElementById('app');
 const loadingEl = document.getElementById('loading');
@@ -215,6 +219,8 @@ async function boot() {
       interior = interiorModule.createInterior(scene, hive, assets, terrain);
       interior.attachColliders(terrain);
       portal = portalModule.createPortal(scene, interior, flight, [
+        hive && hive.group,
+        hive && hive.forest && hive.forest.mesh,
         grass && grass.grass,
         grass && grass.stones,
         grass && grass.tufts,
@@ -244,6 +250,25 @@ async function boot() {
 
   initInput(canvas);
 
+  const createWeather = await importFactory('./world/weather.js', 'createWeather');
+  const weather = createWeather
+    ? createWeather(scene, camera, terrain, sky, { grass, post, quality: 'balanced' })
+    : null;
+
+  const audio = createAudio(camera);
+  if (weather) {
+    weather.onChange((state) => audio.setWeather(state));
+    weather.onLightning((distance) => {
+      if (typeof audio.thunder === 'function') audio.thunder(distance);
+    });
+    audio.setWeather(weather.state);
+  }
+  if (gather && typeof gather.onDeposit === 'function') {
+    gather.onDeposit((event) => audio.play('deposit', {
+      volume: Math.min(1, 0.6 + ((event && event.total) || 0) / 200),
+    }));
+  }
+
   const hud = createHud();
   const hint = createHint();
   let hudVisible = false;
@@ -256,37 +281,219 @@ async function boot() {
     hud.style.display = hudVisible ? 'block' : 'none';
   });
 
+  const viewSize = new THREE.Vector2();
+
   function resize() {
-    const width = window.innerWidth;
-    const height = window.innerHeight;
+    const width = Math.round(canvas.clientWidth || window.innerWidth || 0);
+    const height = Math.round(canvas.clientHeight || window.innerHeight || 0);
+    if (width < 2 || height < 2) return;
+    renderer.getSize(viewSize);
+    const ratio = Math.min(window.devicePixelRatio || 1, RENDER.maxPixelRatio);
+    if (viewSize.x === width && viewSize.y === height && renderer.getPixelRatio() === ratio) return;
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, RENDER.maxPixelRatio));
+    renderer.setPixelRatio(ratio);
     renderer.setSize(width, height, false);
     if (post && typeof post.setSize === 'function') post.setSize(width, height);
   }
   window.addEventListener('resize', resize);
+  document.addEventListener('visibilitychange', resize);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(resize).observe(canvas);
   resize();
 
   const loop = createLoop();
 
+  let mode = 'menu';
+  let cinematic = null;
+  let session = null;
+  let net = null;
+  let netInfo = null;
+  let bankSnapshot = null;
+  const remotes = new Map();
+  let menuAngle = MENU.backdrop.startAngle;
+
+  function applySettings(settings) {
+    if (!settings) return;
+    if (post && typeof post.setQuality === 'function') post.setQuality(settings.quality);
+    audio.setVolumes({ master: settings.master, music: settings.music, sfx: settings.sfx });
+    if (weather && settings.quality) weather.setQuality(settings.quality);
+    if (window.hollowtree) window.hollowtree.settings = settings;
+  }
+
+  function updateMenuCamera(dt, elapsed) {
+    const b = MENU.backdrop;
+    menuAngle += b.speed * dt;
+    const ground = terrain.getHeight(HIVE.x, HIVE.z);
+    camera.position.set(
+      HIVE.x + Math.sin(menuAngle) * b.radius,
+      ground + b.height + Math.sin(elapsed * b.bobSpeed) * b.bobAmp,
+      HIVE.z + Math.cos(menuAngle) * b.radius
+    );
+    camera.lookAt(HIVE.x, ground + b.lookHeight, HIVE.z);
+    camera.rotateY(b.frameOffset);
+    if (camera.fov !== b.fov) {
+      camera.fov = b.fov;
+      camera.updateProjectionMatrix();
+    }
+  }
+
+  async function playOpeningCinematic(context) {
+    try {
+      const module = await import('./cinematic/opening.js');
+      if (typeof module.createOpeningCinematic !== 'function') return;
+      const shot = module.createOpeningCinematic({
+        scene, camera, renderer, terrain, sky, hive, flight, rig, input, context,
+        queen, grass, flowers, post, interior, portal,
+      });
+      if (!shot || typeof shot.play !== 'function') return;
+      cinematic = shot;
+      mode = 'cinematic';
+      if (window.hollowtree) window.hollowtree.cinematic = shot;
+      await shot.play();
+    } catch (error) {
+      console.warn('[main] opening cinematic unavailable —', error && error.message);
+    }
+    if (cinematic && typeof cinematic.dispose === 'function') cinematic.dispose();
+    cinematic = null;
+  }
+
+  async function connectNet(context) {
+    try {
+      net = context && context.net && typeof context.net.detach === 'function'
+        ? context.net.detach()
+        : createNet(context);
+      netInfo = await net.ready;
+      net.onPeerJoin((peer) => {
+        if (!createQueen || remotes.has(peer.uid)) return;
+        const visual = createQueen(scene, assets);
+        remotes.set(peer.uid, visual);
+      });
+      net.onPeerLeave((peer) => {
+        const visual = remotes.get(peer.uid);
+        if (visual && visual.object3D) scene.remove(visual.object3D);
+        remotes.delete(peer.uid);
+      });
+      if (gather && net.bank) {
+        gather.onDeposit((event) => {
+          const applied = (event && event.applied) || {};
+          for (const kind of Object.keys(applied)) {
+            if (applied[kind] > 0) net.bank.deposit(kind, applied[kind]);
+          }
+        });
+        net.bank.onChange((snapshot) => { bankSnapshot = snapshot; });
+      }
+    } catch (error) {
+      console.warn('[main] multiplayer unavailable —', error && error.message);
+      net = null;
+      netInfo = null;
+    }
+  }
+
+  async function enterWorld(context) {
+    session = context || null;
+    await connectNet(session);
+    await playOpeningCinematic(session);
+    camera.fov = CAMERA.fov;
+    camera.updateProjectionMatrix();
+    mode = 'play';
+    hint.style.opacity = DEV.hintOpacity;
+  }
+
+  function openLobby(context) {
+    const lobby = createLobby({
+      mode: context.mode,
+      code: context.code,
+      profile: context.profile,
+      onEnter: (result) => enterWorld({ ...context, ...result }),
+      onCancel: () => menu.show(),
+    });
+    lobby.show();
+  }
+
+  const menu = createMenu({
+    onSettings: applySettings,
+    onLaunch: (context) => {
+      audio.unlock();
+      if (context.mode === 'solo') enterWorld(context);
+      else openLobby(context);
+    },
+  });
+  applySettings(menu.settings);
+
   loop.onFixed((dt) => {
+    if (mode !== 'play') return;
     input.update(dt);
     const cameraYaw = rig && typeof rig.yaw === 'number' ? rig.yaw : input.yaw;
     flight.update(dt, input, cameraYaw);
+    if (weather) flight.velocity.addScaledVector(weather.windAt(flight.position), dt);
     if (portal) portal.update(dt);
     if (gather) gather.update(dt, input);
+    if (net) {
+      net.publishSelf({
+        position: flight.position,
+        quaternion: flight.quaternion,
+        velocity: flight.velocity,
+        carrying: gather ? gather.state.load : 0,
+        swarm: {},
+        cosmetic: session && session.profile
+          ? { color: session.profile.color, pattern: session.profile.pattern }
+          : null,
+      });
+    }
   });
 
   loop.onRender((alpha, dt, elapsed) => {
     if (sky && typeof sky.update === 'function') sky.update(dt, camera.position, elapsed);
+    if (weather) {
+      if (typeof weather.setIndoor === 'function') {
+        weather.setIndoor(portal ? portal.state.insideness : 0);
+      }
+      weather.update(dt, elapsed, camera.position);
+    }
     if (grass && typeof grass.update === 'function') grass.update(dt, camera.position, elapsed);
-    if (queen && typeof queen.update === 'function') queen.update(dt, flight, elapsed);
-    if (rig && typeof rig.update === 'function') rig.update(dt, input, flight);
-    if (interior && portal) interior.clampCamera(camera, portal.state.insideness);
-    if (flowers && typeof flowers.update === 'function') flowers.update(dt, flight.position, elapsed);
+    if (queen && typeof queen.update === 'function' && mode !== 'cinematic') queen.update(dt, flight, elapsed);
+    if (mode === 'play') {
+      if (rig && typeof rig.update === 'function') rig.update(dt, input, flight);
+      if (interior && portal) interior.clampCamera(camera, portal.state.insideness);
+    } else if (mode === 'cinematic' && cinematic && typeof cinematic.update === 'function') {
+      cinematic.update(dt, elapsed);
+    } else if (mode !== 'cinematic') {
+      updateMenuCamera(dt, elapsed);
+    }
+    if (flowers && typeof flowers.update === 'function') {
+      flowers.update(dt, mode === 'cinematic' ? camera.position : flight.position, elapsed);
+    }
     if (hive && typeof hive.update === 'function') hive.update(dt, elapsed);
-    if (gather) gameHud.update(dt, { gather: gather.state, resources: resources.snapshot() });
+    if (net) {
+      net.update(dt);
+      for (const [uid, visual] of remotes) {
+        const peer = net.peers.get(uid);
+        if (!peer || !peer.hasMotion || !visual) continue;
+        visual.update(dt, {
+          position: peer.position,
+          quaternion: peer.quaternion,
+          speedRatio: Math.min(1, Math.hypot(peer.velocity.x, peer.velocity.y, peer.velocity.z) / FLIGHT.maxSpeed),
+          boostAmount: 0,
+        });
+      }
+    }
+
+    if (gather && mode === 'play') {
+      gameHud.update(dt, {
+        gather: gather.state,
+        resources: bankSnapshot || resources.snapshot(),
+      });
+    }
+
+    audio.update(dt, {
+      insideness: portal ? portal.state.insideness : 0,
+      speed: typeof flight.speed === 'number' ? flight.speed : flight.velocity.length(),
+      swarmSize: 0,
+      season: (window.hollowtree && window.hollowtree.season) || 'summer',
+      timeOfDay: sky && typeof sky.timeOfDay === 'number' ? sky.timeOfDay : 0.5,
+      position: flight.position,
+      gathering: gather ? gather.state.charge : 0,
+    });
 
     if (post) {
       try {
@@ -299,7 +506,7 @@ async function boot() {
       renderer.render(scene, camera);
     }
 
-    hint.style.opacity = input.pointerLocked ? 0 : DEV.hintOpacity;
+    hint.style.opacity = mode !== 'play' || input.pointerLocked ? 0 : DEV.hintOpacity;
 
     if (!hudVisible) return;
     hudTimer += dt;
@@ -315,14 +522,22 @@ async function boot() {
 
   window.hollowtree = {
     renderer, scene, camera, terrain, sky, grass, flight, rig, queen, input, loop, assets,
-    hive,
+    hive, menu, audio, weather,
+    enterWorld,
+    get mode() { return mode; },
+    get session() { return session; },
+    get net() { return net; },
+    get netInfo() { return netInfo; },
+    get remotes() { return remotes; },
     nest: interior ? { interior, portal, grid: interior.grid, spec: interior.spec } : null,
   };
 
   setProgress(1);
+  updateMenuCamera(0, 0);
   renderer.render(scene, camera);
   if (loadingEl) loadingEl.classList.add('hidden');
-  hint.style.opacity = DEV.hintOpacity;
+  hint.style.opacity = 0;
+  menu.show();
 
   loop.start();
 }
