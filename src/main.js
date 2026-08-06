@@ -364,6 +364,8 @@ async function boot() {
         ? context.net.detach()
         : createNet(context);
       netInfo = await net.ready;
+      // Flower reserves become shared and server-timed as soon as the session exists.
+      if (flowers && typeof flowers.attachNet === 'function') flowers.attachNet(net);
       net.onPeerJoin((peer) => {
         if (!createQueen || remotes.has(peer.uid)) return;
         const visual = createQueen(scene, assets);

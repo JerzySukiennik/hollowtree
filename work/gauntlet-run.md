@@ -339,3 +339,66 @@ Closing the Critic's secondary gap "the authority and world-clock layer is dead 
   regrow while nobody plays. Handed to a builder with the transactional API (`net.flowers.amount/drain/subscribe`)
   and its own verification page.
 - Live database cleaned: both throwaway test hives (`RULECHECK1`, `RCWWC2TPJA`) deleted; `hives` is now empty.
+
+## Round 2 — flowers
+
+- Critic identity: fresh-context Critic (second distinct session on this set), same rubric, revision-specific gates.
+- Critic verdict: **PASS**, confidence high. Weighted **86/100** (was 81). Scores: readability 4, form 4, colour 4, spec 5, instancing 5.
+- Gates: **G1-G5 all PASS.** Notably the Critic rejected grouping by vertex colour for the intersection test and grouped by
+  position-welded connected components instead (the files ship unwelded for flat shading, so raw-index islands are
+  meaningless) — 36/21/13 authored parts. Exact Moller tri-tri test excluding shared-vertex pairs: **zero
+  stem-through-bloom pairs on the harebell**; every intersection is an intentional join hidden inside a calyx.
+  Degenerate check: 0 triangles under 1 % of median area in all three (the hairline sliver is gone). Budgets
+  165/144/149. Heights exact. Palette measured on the file: harebell peak is exactly #b9cdf2, so the near-white
+  wash-out is fixed; daisy underside is now warm tan, not grey.
+- This is the **second candidate to meet the full pass rule** (>=85 weighted, every critical dimension >=4, all gates).
+- Largest remaining gap (refinement): the harebell's five pedicels leave a vertical stem at 2.7-18.9 degrees from
+  horizontal as straight prisms, so each plant reads as bells hung from right-angle booms rather than arching stalks.
+- Secondary: clover leaflets are flat 2-tri kites with no midrib fold; the bell wall is a single straight taper with
+  lobing only at the rim; the daisy is the only file pushed to pure white (45 verts at linear 1.0); leaves are
+  zero-thickness sheets that rely on the engine material being DoubleSide.
+- Best-known candidate: flower set r2, 86/100, PASS.
+
+## Shared flower reserves — verification caught a Node-vs-browser gap
+
+The builder delivered 30/0 in Node and correctly refused to claim it had seen the game render. I took that gate and
+found the discrepancy: **the same page fails in the browser**, which is the shipping environment.
+
+```
+FAIL  shared depletion timed out after 20 s
+FAIL  the transaction credits what it actually took  (no callback)
+FAIL  the draining client sees the reduced reserve  (4.290 vs 3.500)
+FAIL  the other client sees the same reduced reserve  (4.561 vs 3.500)
+FAIL  contention timed out after 20 s
+```
+
+The drifting reserve readings (rather than a wrong-but-stable number) point at the derived value continuing to regrow
+while the drain never commits — i.e. the transaction never resolves in the browser at all. Prime suspect is the local
+driver's transport: two simulated clients inside one tab and `BroadcastChannel` not delivering to the instance that
+posted. Sent back with the requirement to say plainly whether the defect is in the harness or in the shipping code —
+because if the drain genuinely never resolves in a browser, the Node suite has been measuring something players never run.
+
+The game itself boots and renders with `flowers.attachNet(net)` wired in `main.js`: meadow, flowers, welded tree,
+background trees, frames advancing, no boot errors.
+
+## Completion (session of 2026-08-06, second half)
+
+- Final status: **2 PASS, 2 CONDITIONAL PASS, 1 orchestrator-verified only, 1 item in flight**
+- Final candidates:
+  - `hollow.glb` — **PASS**, 86/100, all gates (fresh Critic, round 2)
+  - `flower-{daisy,clover,harebell}.glb` — **PASS**, 86/100, all gates (fresh Critic, round 2)
+  - `hollow-tree.glb` — CONDITIONAL PASS, **90/100**, all gates (fresh Critic, round 3). The condition it named
+    (the interior-exposing crevice) has since been removed and re-verified by me: 1 connected component, 0 boundary
+    edges, 97-ray passage with 0 failures, height 74.0000, aperture now the specified r=3.2 circle. A fourth Critic
+    pass would be needed to convert that into a formal PASS.
+  - `meadow-tree.glb` — orchestrator-verified against spec only, **no independent Critic** (disclosed topology gap)
+  - netcode — REJECT at 62/100 in round 1, rebuilt around a server-timestamped lease; suites now 49/0 and 27/0 with
+    the Critic's own acceptance test green (0 dual-owner samples of 472 over a 24 s stall). **Not yet re-critiqued.**
+  - audio, weather — still never independently critiqued (disclosed).
+- In flight: shared flower reserves. 30/0 in Node, but **5 failures in the browser** — sent back with the requirement
+  to identify whether the defect is in the harness or the shipping code.
+- Rounds: hollow-tree 3, flowers 2, hollow 2, meadow-tree 1, netcode 1 (+1 rebuild pending review).
+- Role topology: Orchestrator + 8 specialist Builders + 8 fresh-context Critics. Every decisive review used a fresh
+  Critic that did not build the artifact.
+- Verification lessons recorded to the vault this session: a stale `fps` counter on a stopped loop; one settled sample
+  cannot prove a single-owner invariant; a green Node run says nothing about browser-only APIs.

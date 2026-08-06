@@ -292,7 +292,6 @@ export function createFlowers(scene, terrain) {
 
   let net = null;
   let unsubscribeNet = null;
-  const NET_ECHO_GRACE_MS = 1500;
   const FULL_EPS = 1e-4;
 
   const counts = new Uint16Array(table.length);
@@ -606,25 +605,23 @@ export function createFlowers(scene, terrain) {
   function pump(i) {
     if (!net || inFlight[i] || !(pendingWant[i] > 0)) return;
     const want = pendingWant[i];
+    const seqAtSend = echoSeq[i];
     pendingWant[i] = 0;
     inFlight[i] = 1;
     net.flowers.drain(ids[i], want, specs[speciesOf[i]]).then((taken) => {
       inFlight[i] = 0;
       if (taken > 0) {
-        // Our own write comes back through subscribe a moment later; until it does,
-        // this number is the freshest truth we have about the flower.
-        echoUntil[i] = Date.now() + NET_ECHO_GRACE_MS;
-        applyAmount(i, reserve[i] - taken);
+        // If our own write already echoed back while this was in flight, the shared entry
+        // is newer than anything we could compute — subtracting again would double-count.
+        if (echoSeq[i] === seqAtSend) applyAmount(i, reserve[i] - taken);
+        else applyAmount(i, amountOf(i));
         const cb = pendingCb[i];
         if (cb) cb(makeScoop(i, taken));
-      } else {
-        echoUntil[i] = 0;
       }
       if (pendingWant[i] > 0) pump(i);
     }, () => {
       inFlight[i] = 0;
       pendingWant[i] = 0;
-      echoUntil[i] = 0;
     });
   }
 
@@ -658,11 +655,20 @@ export function createFlowers(scene, terrain) {
     return scoop;
   }
 
+  // One flower changed somewhere in the world — ours or another queen's. Cheap: two
+  // numbers stored, one instance repainted.
   function onRemoteFlower(id, entry) {
     const i = indexOfId(id);
     if (i < 0) return;
-    echoUntil[i] = 0;
-    const value = entry ? net.flowers.amount(id, specs[speciesOf[i]]) : reserveMax[i];
+    echoSeq[i] = (echoSeq[i] + 1) >>> 0;
+    if (entry) {
+      hasEntry[i] = 1;
+      netStored[i] = Number(entry.a) || 0;
+      netDrainedAt[i] = Number(entry.d) || 0;
+    } else {
+      hasEntry[i] = 0;
+    }
+    const value = amountOf(i);
     applyAmount(i, value);
     if (value < reserveMax[i] - FULL_EPS) track(i);
   }
@@ -674,16 +680,19 @@ export function createFlowers(scene, terrain) {
     if (!handle || !handle.flowers || typeof handle.flowers.drain !== 'function') return false;
     if (unsubscribeNet) { try { unsubscribeNet(); } catch (error) { /* already gone */ } }
     net = handle;
-    unsubscribeNet = net.flowers.subscribe(onRemoteFlower) || null;
+    serverClockAt = 0;
+    // Start from "nobody has touched anything" and let the subscription fill in the
+    // flowers that have been drained — it replays every existing entry on attach. The
+    // opposite order would wipe what it just delivered, and a meadow that reads empty
+    // until the first event is the bug this milestone exists to kill.
     for (let i = 0; i < total; i++) {
       pendingWant[i] = 0;
       inFlight[i] = 0;
-      echoUntil[i] = 0;
-      const value = net.flowers.amount(ids[i], specs[speciesOf[i]]);
-      applyAmount(i, value);
-      if (value < reserveMax[i] - FULL_EPS) track(i);
-      else untrack(i);
+      hasEntry[i] = 0;
+      applyAmount(i, reserveMax[i]);
+      untrack(i);
     }
+    unsubscribeNet = net.flowers.subscribe(onRemoteFlower) || null;
     return true;
   }
 
@@ -745,12 +754,12 @@ export function createFlowers(scene, terrain) {
     // Re-derive only the flowers that are not full. No accumulation: the value comes
     // from the drain stamp, so regrowth that happened while the tab was closed (or
     // while another queen was the only one playing) is already in it.
-    const stamp = Date.now();
+    const stamp = net ? serverNow() : 0;
     for (let n = trackedCount - 1; n >= 0; n--) {
       const i = trackedList[n];
-      if (echoUntil[i] > stamp) continue;
-      applyAmount(i, amountOf(i));
-      if (reserve[i] >= reserveMax[i] - FULL_EPS && !inFlight[i] && !(pendingWant[i] > 0)) untrack(i);
+      if (inFlight[i]) continue;
+      applyAmount(i, amountOf(i, stamp));
+      if (reserve[i] >= reserveMax[i] - FULL_EPS && !(pendingWant[i] > 0)) untrack(i);
     }
 
     const perFrame = Math.min(total, FLOWERS.updatePerFrame);

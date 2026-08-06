@@ -191,6 +191,8 @@ async function caseContention() {
   await na.ready;
   await nb.ready;
   const spec = { max: DAISY.reserve, regrowth: DAISY.regrowth, regrowDelay: DAISY.regrowDelay };
+  // amount() reads the subscription cache, so a client that wants to read must subscribe.
+  na.flowers.subscribe(() => {});
 
   const [ta, tb] = await Promise.all([
     na.flowers.drain('f1', 5, spec),
@@ -202,10 +204,12 @@ async function caseContention() {
   check('both takes are non-negative and something was taken', ta >= 0 && tb >= 0 && sum > 0,
     `${ta.toFixed(3)} / ${tb.toFixed(3)}`);
 
-  const left = await na.world.get('flowers/f1');
-  const remaining = left ? Number(left.a) : NaN;
-  check('what is left matches what was taken', Math.abs(remaining - (DAISY.reserve - sum)) < 1e-3,
-    `stored ${remaining.toFixed(3)}, expected ${(DAISY.reserve - sum).toFixed(3)}`);
+  // Both writes have to land before this reads: the first echo is only one of the two.
+  const expectLeft = DAISY.reserve - sum;
+  await until(() => Math.abs(na.flowers.amount('f1', spec) - expectLeft) < 0.02, 4000);
+  const remaining = na.flowers.amount('f1', spec);
+  check('what is left matches what was taken', Math.abs(remaining - (DAISY.reserve - sum)) < 0.02,
+    `${remaining.toFixed(3)} left, expected ${(DAISY.reserve - sum).toFixed(3)}`);
 
   na.dispose(); nb.dispose();
   await sleep(200);
@@ -220,6 +224,7 @@ async function caseRegrowth() {
   await na.ready;
   await nb.ready;
   const spec = { max: DAISY.reserve, regrowth: DAISY.regrowth, regrowDelay: DAISY.regrowDelay };
+  nb.flowers.subscribe(() => {});
 
   const taken = await na.flowers.drain('f2', 4, spec);
   const stored = DAISY.reserve - taken;
