@@ -129,7 +129,11 @@ export function createBuildMode(options) {
         continue;
       }
       // Bare lattice: only the wall itself, or a spot backed by an existing cell.
-      if (c.layer === 0 || grid.has(c.col, c.row, c.layer - 1)) {
+      if (c.layer === 0) return { target: c, hover };
+      if (grid.has(c.col, c.row, c.layer - 1)) {
+        // The cell you can actually see through this empty slot is the one behind it,
+        // so that is what right-click tears down.
+        if (!hover) hover = comb.cellAt(c.col, c.row, c.layer - 1);
         return { target: c, hover };
       }
       if (!fallback) fallback = c;
@@ -284,6 +288,8 @@ export function createBuildMode(options) {
 
   function open() {
     if (state.open) return;
+    // Build mode belongs inside the hollow and in play, not on the meadow or in a menu.
+    if (typeof opts.canOpen === 'function' && !opts.canOpen()) return;
     state.open = true;
     if (!comb.typeUnlocked(state.typeId)) state.typeId = comb.unlockedTypes()[0] || state.typeId;
     if (panel) panel.show();

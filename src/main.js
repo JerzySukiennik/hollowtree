@@ -13,6 +13,9 @@ import { createLobby } from './ui/lobby.js';
 import { createAudio } from './audio/index.js';
 import { createNet } from './net/index.js';
 import { seasonAt } from './net/offline.js';
+import { createComb } from './nest/comb.js';
+import { createBuildMode } from './nest/build-mode.js';
+import { createBuildPanel } from './ui/build-panel.js';
 
 const canvas = document.getElementById('app');
 const loadingEl = document.getElementById('loading');
@@ -290,6 +293,23 @@ async function boot() {
     }));
   }
 
+  let comb = null;
+  let buildPanel = null;
+  let build = null;
+  if (interior) {
+    comb = createComb({ interior, resources, audio });
+    buildPanel = createBuildPanel({ onSelect: (id) => build && build.selectType(id) });
+    build = createBuildMode({
+      comb,
+      camera,
+      interior,
+      panel: buildPanel,
+      audio,
+      domElement: canvas,
+      canOpen: () => mode === 'play' && Boolean(portal) && portal.state.insideness > 0.5,
+    });
+  }
+
   const hud = createHud();
   const hint = createHint();
   let hudVisible = false;
@@ -387,6 +407,7 @@ async function boot() {
       netInfo = await net.ready;
       // Flower reserves become shared and server-timed as soon as the session exists.
       if (flowers && typeof flowers.attachNet === 'function') flowers.attachNet(net);
+      if (comb) comb.attachNet(net);
       net.onPeerJoin((peer) => {
         if (!createQueen || remotes.has(peer.uid)) return;
         const visual = createQueen(scene, assets);
@@ -464,7 +485,8 @@ async function boot() {
     flight.update(dt, input, cameraYaw);
     if (weather) flight.velocity.addScaledVector(weather.windAt(flight.position), dt);
     if (portal) portal.update(dt);
-    if (gather) gather.update(dt, input);
+    if (gather && !(build && build.state.open)) gather.update(dt, input);
+    if (comb) comb.update(dt);
     if (net) {
       net.publishSelf({
         position: flight.position,
@@ -493,6 +515,10 @@ async function boot() {
     if (mode === 'play') {
       if (rig && typeof rig.update === 'function') rig.update(dt, input, flight);
       if (interior && portal) interior.clampCamera(camera, portal.state.insideness);
+      if (build) {
+        if (build.state.open && portal && portal.state.insideness < 0.35) build.close();
+        build.update(dt);
+      }
     } else if (mode === 'cinematic' && cinematic && typeof cinematic.update === 'function') {
       cinematic.update(dt, elapsed);
     } else if (mode !== 'cinematic') {
@@ -525,9 +551,11 @@ async function boot() {
     }
 
     if (gather && mode === 'play') {
+      const bank = bankSnapshot || resources.snapshot();
       gameHud.update(dt, {
         gather: gather.state,
-        resources: bankSnapshot || resources.snapshot(),
+        resources: comb ? { ...bank, honey: comb.stores.honey } : bank,
+        capacity: comb ? comb.capacity : null,
       });
     }
 
@@ -575,7 +603,7 @@ async function boot() {
     get net() { return net; },
     get netInfo() { return netInfo; },
     get remotes() { return remotes; },
-    nest: interior ? { interior, portal, grid: interior.grid, spec: interior.spec } : null,
+    nest: interior ? { interior, portal, grid: interior.grid, spec: interior.spec, comb, build } : null,
   };
 
   setProgress(1);

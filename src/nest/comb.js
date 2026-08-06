@@ -23,12 +23,6 @@ const _neighbours = [];
 
 const CAP_KINDS = ['pollen', 'nectar', 'resin', 'honey'];
 
-function emptyCapacity() {
-  const out = {};
-  for (const kind of CAP_KINDS) out[kind] = Number(COMB_TUNING.baseCapacity[kind]) || 0;
-  return out;
-}
-
 // Multiplies one named entry of a plain effects clone by (1 + bonus). The path grammar
 // is the `applies` field from config.comb.js: 'swarmCap', 'convert.rate', 'capacity.pollen'.
 function applyBonusPath(effects, path, factor) {
@@ -75,8 +69,18 @@ export function createComb(options) {
   const audio = opts.audio || null;
 
   const entrance = opts.entrance || (spec
-    ? { s: spec.entranceS, y: spec.entranceY }
+    ? { s: spec.entranceS, y: spec.entranceY, radius: spec.entranceRadius }
     : null);
+
+  // The bare hollow's own room, before a single store cell. Overridable so a harness can
+  // fund itself without rewriting the shipped economy.
+  const baseCapacity = { ...COMB_TUNING.baseCapacity, ...(opts.baseCapacity || {}) };
+
+  function emptyCapacity() {
+    const out = {};
+    for (const kind of CAP_KINDS) out[kind] = Number(baseCapacity[kind]) || 0;
+    return out;
+  }
 
   const cells = new Map();          // key -> record
   const building = new Set();       // records still under construction
@@ -308,24 +312,25 @@ export function createComb(options) {
 
   let mouthKeys = new Set();
 
+  // The mouth is the ring of buildable cells hugging the aperture. It cannot be found by
+  // walking neighbours — the aperture cells are invalid, so neighbours() never returns
+  // them and a hop-count from the anchor lands inside the hole. Measure instead: the
+  // aperture is excluded on a max(ds, dy) box of (radius + COMB.entranceClear), so every
+  // valid cell within a couple of pitches of that box is, by construction, its rim.
   function computeMouth() {
     mouthKeys = new Set();
     if (!entrance) return;
-    const anchor = grid.seed(entrance.s, entrance.y, 0);
-    const seen = new Set();
-    let frontier = [{ ...anchor, d: 0 }];
-    while (frontier.length) {
-      const next = [];
-      for (const node of frontier) {
-        const k = grid.key(node.col, node.row, node.layer);
-        if (seen.has(k)) continue;
-        seen.add(k);
-        if (grid.isValid(node.col, node.row, node.layer)) mouthKeys.add(k);
-        if (node.d >= COMB_TUNING.apertureRing) continue;
-        const list = grid.neighbors(node.col, node.row, node.layer, _neighbours.slice());
-        for (const n of list) next.push({ ...n, d: node.d + 1 });
+    const clear = (Number(entrance.radius) || 0) + COMB.entranceClear;
+    const band = clear + COMB_TUNING.apertureRing * grid.cellWidth;
+    for (let row = 0; row <= grid.rows; row++) {
+      if (Math.abs(grid.yOf(row) - entrance.y) > band) continue;
+      for (let col = 0; col < grid.columns; col++) {
+        if (!grid.isValid(col, row, 0)) continue;
+        let ds = Math.abs(grid.sOf(col, row) - grid.wrapS(entrance.s));
+        if (ds > grid.perimeter * 0.5) ds = grid.perimeter - ds;
+        if (Math.max(ds, Math.abs(grid.yOf(row) - entrance.y)) > band) continue;
+        mouthKeys.add(grid.key(col, row, 0));
       }
-      frontier = next;
     }
   }
 
@@ -715,29 +720,42 @@ export function createComb(options) {
     return { honey, nectar, clipped: honey < wanted - 1e-9, seconds };
   }
 
-  async function runConvert(seconds) {
-    const step = convertStep(seconds);
-    if (!step) return null;
-    if (net) {
-      if (!net.authority || !net.authority.isMine()) return null;
-      const paid = await net.bank.spend({ nectar: step.nectar });
-      if (!paid) return null;
-      await net.comb.transact('stores/honey', (current) => {
-        const base = Number(current) || 0;
-        return Math.min(effects.capacity.honey, base + step.honey);
-      });
-      stores.honey = Math.min(effects.capacity.honey, stores.honey + step.honey);
-    } else {
-      if (resources && typeof resources.apply === 'function') {
-        if (!resources.apply({ nectar: -step.nectar })) return null;
-      }
-      stores.honey = Math.min(effects.capacity.honey, stores.honey + step.honey);
-    }
+  function tally(step, seconds) {
     if (step.clipped) convert.clipped += seconds;
     else convert.processedSec += seconds;
     convert.produced += step.honey;
     convert.drained += step.nectar;
     fire();
+  }
+
+  // Offline the whole ripening step is synchronous — no promise, so a burst of frames
+  // really does run a burst of ticks instead of one per microtask turn.
+  function convertLocal(seconds) {
+    const step = convertStep(seconds);
+    if (!step) return null;
+    if (resources && typeof resources.apply === 'function') {
+      if (!resources.apply({ nectar: -step.nectar })) return null;
+    }
+    stores.honey = Math.min(effects.capacity.honey, stores.honey + step.honey);
+    tally(step, seconds);
+    return step;
+  }
+
+  // Networked: only the world owner ripens, and it does so as a spend plus a transaction,
+  // so three clients watching the same honey store never triple-count it.
+  async function runConvert(seconds) {
+    if (!net) return convertLocal(seconds);
+    const step = convertStep(seconds);
+    if (!step) return null;
+    if (!net.authority || !net.authority.isMine()) return null;
+    const paid = await net.bank.spend({ nectar: step.nectar });
+    if (!paid) return null;
+    await net.comb.transact('stores/honey', (current) => {
+      const base = Number(current) || 0;
+      return Math.min(effects.capacity.honey, base + step.honey);
+    });
+    stores.honey = Math.min(effects.capacity.honey, stores.honey + step.honey);
+    tally(step, seconds);
     return step;
   }
 
@@ -777,11 +795,13 @@ export function createComb(options) {
       if (convert.accumulator >= COMB_TUNING.convertTickSec && !convert.busy) {
         const slice = convert.accumulator;
         convert.accumulator = 0;
-        convert.busy = true;
-        const done = () => { convert.busy = false; };
-        const result = runConvert(slice);
-        if (result && typeof result.then === 'function') result.then(done, done);
-        else done();
+        if (!net) {
+          convertLocal(slice);
+        } else {
+          convert.busy = true;
+          const done = () => { convert.busy = false; };
+          runConvert(slice).then(done, done);
+        }
       }
     }
   }
@@ -852,6 +872,7 @@ export function createComb(options) {
     get staffing() { return staffing; },
 
     convertStep,
+    convertLocal,
     runConvert,
     update,
     recompute,

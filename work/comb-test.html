@@ -23,7 +23,6 @@
 <pre id="report">running…</pre>
 <script type="module">
 import * as THREE from 'three';
-import { COMB } from '../src/config.js';
 import { NET } from '../src/config.net.js';
 import { CELL_BY_ID, COMB_TUNING, costOf, refundOf } from '../src/config.comb.js';
 import { createHexGrid } from '../src/nest/hexgrid.js';
@@ -79,7 +78,7 @@ const VOLUME = {
   floorY: 0, ceilY: 40,
   entranceWall: 0, entranceS: 48, entranceY: 16, entranceRadius: 3.2,
 };
-const ENTRANCE = { s: VOLUME.entranceS, y: VOLUME.entranceY };
+const ENTRANCE = { s: VOLUME.entranceS, y: VOLUME.entranceY, radius: VOLUME.entranceRadius };
 const RICH = { pollen: 1e6, nectar: 1e6, resin: 1e6, honey: 0 };
 
 const makeGrid = () => createHexGrid({ ...VOLUME });
@@ -207,9 +206,11 @@ await withDeadline('entrance route', async () => {
   check(comb.typeUnlocked('guard'), 'the workshop unlocks the guard post');
 
   // A chain running away from the aperture along one row.
+  // Long enough to leave the aperture's rim behind: the mouth ring is as wide as the
+  // hole, so "far from the entrance" is measured in cells, not in a couple of steps.
   const chain = [];
   let cursor = { col: mouth.col, row: mouth.row, layer: 0 };
-  for (let i = 0; i < 9; i++) {
+  for (let i = 0; i < 26; i++) {
     cursor = { col: grid.wrapCol(cursor.col + 1), row: cursor.row, layer: 0 };
     if (!grid.isValid(cursor.col, cursor.row, 0)) break;
     const r = await comb.place(cursor.col, cursor.row, 0, 'pollen');
