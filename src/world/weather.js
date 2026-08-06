@@ -214,6 +214,11 @@ export function createWeather(scene, camera, terrain, sky, options = {}) {
   const grass = options.grass || null;
   const post = options.post || null;
   const quality = { id: options.quality || WEATHER.quality };
+  // World time. Defaults to this machine's clock so the module still stands alone,
+  // but a session passes the server-corrected clock: the schedule is a pure function
+  // of time, so a client whose clock is minutes off would otherwise sit in a
+  // different storm from everyone else.
+  const now = typeof options.now === 'function' ? options.now : Date.now;
 
   const sun = sky && sky.sun ? sky.sun : null;
   const hemi = sky && sky.hemi ? sky.hemi : null;
@@ -232,7 +237,7 @@ export function createWeather(scene, camera, terrain, sky, options = {}) {
 
   const schedule = {
     seed: WEATHER.seed,
-    startedAt: Date.now(),
+    startedAt: now(),
     durationMs: WEATHER.phaseMinutes * 60000,
     transitionMs: WEATHER.transitionSeconds * 1000,
     kind: 'clear',
@@ -311,7 +316,7 @@ export function createWeather(scene, camera, terrain, sky, options = {}) {
     if (!payload) return;
     copyLook(lookFrom, look);
     overrideBlend = 0;
-    overrideStart = Date.now();
+    overrideStart = now();
     if (typeof payload.seed === 'number') schedule.seed = payload.seed | 0;
     if (typeof payload.startedAt === 'number') schedule.startedAt = payload.startedAt;
     if (typeof payload.durationMs === 'number' && payload.durationMs > 1000) schedule.durationMs = payload.durationMs;
@@ -342,7 +347,7 @@ export function createWeather(scene, camera, terrain, sky, options = {}) {
   }
 
   function sample(nowMs) {
-    const t = typeof nowMs === 'number' ? nowMs : Date.now();
+    const t = typeof nowMs === 'number' ? nowMs : now();
     const s = scheduleInto({ prevKind: '', nextKind: '', blend: 0, intensity: 0, index: 0, phaseStart: 0 }, t);
     const l = mixLook(makeLook(), presetLook(makeLook(), s.prevKind), presetLook(makeLook(), s.nextKind), s.blend);
     const kind = s.blend < 0.5 ? s.prevKind : s.nextKind;
@@ -803,7 +808,7 @@ export function createWeather(scene, camera, terrain, sky, options = {}) {
   function update(dt, elapsed, cameraPosition) {
     const step = Math.min(dt || 0, 0.05);
     shaderTime += step;
-    const nowMs = Date.now();
+    const nowMs = now();
     const p = cameraPosition || (camera ? camera.position : followPosition);
 
     lookAt(lookScheduled, nowMs);
@@ -852,9 +857,9 @@ export function createWeather(scene, camera, terrain, sky, options = {}) {
     return windVec;
   }
 
-  setFromWorld({ kind: 'clear', intensity: 1, seed: WEATHER.seed, startedAt: Date.now() });
+  setFromWorld({ kind: 'clear', intensity: 1, seed: WEATHER.seed, startedAt: now() });
   overrideBlend = 1;
-  lookAt(lookScheduled, Date.now());
+  lookAt(lookScheduled, now());
   copyLook(look, lookScheduled);
   state.kind = scheduled.nextKind;
   lastKind = state.kind;

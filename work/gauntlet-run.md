@@ -547,3 +547,18 @@ Also open: weather reads `Date.now()` rather than the net layer's server-correct
 disagreement at 3 minutes of client clock offset), and audio's fallback thunder scheduler stays live during `rain`
 phases because `setDriven()` is only reached when a preset has non-zero lightning — so clients hear thunder that
 nobody else hears and that no flash accompanies.
+
+## Weather clock closed (orchestrator)
+
+The Critic's third secondary gap is fixed: `createWeather` now takes an optional `now` function, defaulting to
+`Date.now` so the module still stands alone, and `main.js` passes `worldNow` — the session's server-corrected clock
+when a hive exists, this machine's otherwise. All six `Date.now()` reads inside `weather.js` route through it, so the
+measured 28 % kind disagreement at 3 minutes of client clock offset can no longer happen between players.
+
+Ordering trap worth recording: `createWeather` samples the clock **while constructing** (`schedule.startedAt = now()`),
+and `worldNow` closes over `net`. With `let net` declared after the weather creation that is a temporal dead zone
+throw at boot, not a silent fallback. `net` and `worldNow` are now declared before the systems that read the clock,
+with a comment saying why.
+
+Verified in-engine after the change: boots clean, weather constructed, season reads `spring` offline, sun elevation
+moves between frames (96.2 -> 77.4) and the meadow renders. `net-logic` 27/0.

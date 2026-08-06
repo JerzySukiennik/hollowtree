@@ -251,9 +251,29 @@ async function boot() {
 
   initInput(canvas);
 
+  // Declared before the systems that read the clock: weather samples it while it is
+  // being constructed, so `net` must already exist as a binding even when it is null.
+  let net = null;
+  const soloEpoch = Date.now();
+
+  // World time: the session's server-corrected clock when there is one, otherwise this
+  // machine's. Everything time-derived reads this — the day/night cycle, the calendar,
+  // and the weather schedule — so a player whose clock is minutes off still sees the
+  // same light and the same storm as everyone else.
+  function worldNow() {
+    return net && net.world && typeof net.world.now === 'function' ? net.world.now() : Date.now();
+  }
+
+  function timeOfDayAt(nowMs) {
+    const span = SKY.dayLengthMs > 0 ? SKY.dayLengthMs : 1;
+    return ((nowMs / span) % 1 + 1 + SKY.defaultTimeOfDay) % 1;
+  }
+
   const createWeather = await importFactory('./world/weather.js', 'createWeather');
   const weather = createWeather
-    ? createWeather(scene, camera, terrain, sky, { grass, post, quality: 'balanced' })
+    ? createWeather(scene, camera, terrain, sky, {
+        grass, post, quality: 'balanced', now: worldNow,
+      })
     : null;
 
   const audio = createAudio(camera);
@@ -307,24 +327,11 @@ async function boot() {
   let mode = 'menu';
   let cinematic = null;
   let session = null;
-  let net = null;
   let netInfo = null;
   let bankSnapshot = null;
   let season = null;
   let timeOfDay = SKY.defaultTimeOfDay;
-  const soloEpoch = Date.now();
   const remotes = new Map();
-
-  // World time: the net clock when a session exists, otherwise this machine's.
-  // Time of day is derived from it, so it advances offline and agrees between players.
-  function worldNow() {
-    return net && net.world && typeof net.world.now === 'function' ? net.world.now() : Date.now();
-  }
-
-  function timeOfDayAt(nowMs) {
-    const span = SKY.dayLengthMs > 0 ? SKY.dayLengthMs : 1;
-    return ((nowMs / span) % 1 + 1 + SKY.defaultTimeOfDay) % 1;
-  }
   let menuAngle = MENU.backdrop.startAngle;
 
   function applySettings(settings) {
