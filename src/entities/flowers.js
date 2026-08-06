@@ -483,15 +483,17 @@ export function createFlowers(scene, terrain) {
     return regrownAmount(rgo);
   }
 
-  function localAmount(i) {
-    return derive(i, storedAmt[i], drainedAt[i], Date.now());
+  function localAmount(i, wallMs) {
+    return derive(i, storedAmt[i], drainedAt[i], wallMs || Date.now());
   }
 
   // The single read path: the shared world when we are connected to one, this machine's
   // own derived value when we are not. Solo without a net handle behaves as it always did.
   // A flower with no shared entry has never been drained by anyone — it is full.
+  // nowMs is sampled once per frame by the caller: reading the clock per flower cost more
+  // than the arithmetic did, over a thousand of them.
   function amountOf(i, nowMs) {
-    if (!net) return localAmount(i);
+    if (!net) return localAmount(i, nowMs);
     if (!hasEntry[i]) return reserveMax[i];
     return derive(i, netStored[i], netDrainedAt[i], nowMs || serverNow());
   }
@@ -754,7 +756,7 @@ export function createFlowers(scene, terrain) {
     // Re-derive only the flowers that are not full. No accumulation: the value comes
     // from the drain stamp, so regrowth that happened while the tab was closed (or
     // while another queen was the only one playing) is already in it.
-    const stamp = net ? serverNow() : 0;
+    const stamp = net ? serverNow() : Date.now();
     for (let n = trackedCount - 1; n >= 0; n--) {
       const i = trackedList[n];
       if (inFlight[i]) continue;

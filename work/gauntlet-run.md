@@ -402,3 +402,66 @@ background trees, frames advancing, no boot errors.
   Critic that did not build the artifact.
 - Verification lessons recorded to the vault this session: a stale `fps` counter on a stopped loop; one settled sample
   cannot prove a single-owner invariant; a green Node run says nothing about browser-only APIs.
+
+## Correction — the "browser fails where Node passes" verdict was my measurement error
+
+I reported that the shared-reserve harness failed five cases in the browser and sent that back to the builder as a
+defect. It was not one. The rebuilt page probes its own environment first and prints:
+
+```
+INFO  tab is hidden; a 25 ms timer took 2984 ms — this tab is throttled ~126x by the browser,
+      so every deadline below is stretched to match.
+PASS  a second BroadcastChannel in this document hears the first  (same-document delivery works)
+PASS  a peer's drain reaches the other client's subscription  (a=4.000 arrived 16358 ms after the drain was asked for)
+```
+
+The Browser preview pane reports `document.hidden === true` whenever it is not painting, and a hidden tab has its
+timers throttled ~126x. Cross-client delivery worked the whole time — it just took 16 s of wall clock instead of
+~100 ms, which blew every 20 s deadline in the original harness. My BroadcastChannel hypothesis was wrong too:
+same-document delivery works, and the builder proved it rather than accepting my theory.
+
+**Same family as the two earlier traps in this run** (a stale `fps` counter on a stopped loop; one settled sample
+used to "prove" a single-owner invariant) — a measurement taken where the defect does not live. This time it cost a
+false defect report to a builder. The rule to carry forward: **before treating a timing failure in the preview pane
+as a product defect, check `document.hidden` and measure the actual timer skew** — and prefer harnesses that
+self-report their environment, as this one now does.
+
+## Flaky test found while re-verifying (2026-08-06 18:3x)
+
+`net-node`'s *no rubber-banding or jitter between frames* flips under machine load:
+three consecutive runs on this machine gave FAIL 0.628 m, FAIL 0.632 m, PASS 0.517 m against the same code.
+Several subagents were compiling and rendering at the time. So the suite's headline number is load-sensitive:
+"49 passed / 0 failed" is true on an idle machine and not reproducible on a busy one. That is a test-robustness
+defect, not (on this evidence) a product defect — but it cuts both ways, because a threshold that trips on load
+can also mask a real regression on a quiet run. Recorded for the netcode owner: the case should either measure
+against simulated frame times rather than wall clock, or state a load-independent bound.
+
+## Second correction — the "lost update" was also not a defect
+
+I escalated `5.000 + 5.000 = 10.000 of 6` as a genuine double-spend, citing the harness's own annotation
+("both commits inside one regrowDelay, so no regrowth was possible") as ruling out the innocent explanation.
+**The annotation itself was wrong.** It computed the window from a record that, under throttling, had only received
+the first client's echo, so it measured ~0 s where 16 s had actually elapsed. The second transaction detected the
+conflict and retried correctly; by the time it committed, the flower had legitimately regrown.
+
+Atomicity was then proved with a test no timing can explain away — regrowth switched off, three clients racing one
+bloom under a 4 s timer clamp:
+
+```
+PASS  three queens on one frozen bloom split exactly what it held, no more
+      (5.000 + 1.000 + 0.000 = 6.000 of 6 (15 asked, regrowth off))
+PASS  with regrowth live, the takes stay inside what the flower could grow meanwhile
+      (5.000 + 2.204 = 7.204 of at most 9.607 over a 12.0 s race)
+```
+
+The second FAIL (`no geometry or buffer rebuild`) was a static assertion string plus a browser-only cause: the
+authored `flower-*.glb` files exist in the browser and not in the Node harness, so `adopt()` legitimately swapped
+the geometry mid-case. Both fixed.
+
+One real code finding did come out of it: the offline read path called `Date.now()` **per flower, 1050x per frame**;
+now sampled once per frame, worst case 1.31 -> 0.40 ms/frame.
+
+**Three iterations in a row I took a measurement from a throttled environment as the product's state** — first the
+timeouts, then the drifting reserves, then this. Each time the builder was right to probe the environment before the
+code. The durable rule: a harness must report the window it actually measured, not the one it assumed, and an
+orchestrator must not treat a harness's own annotation as independent evidence.
