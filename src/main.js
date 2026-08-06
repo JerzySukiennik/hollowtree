@@ -1,7 +1,7 @@
 // Hollowtree — bootstrap: renderer, scene, module wiring and the frame loop.
 
 import * as THREE from 'three';
-import { CAMERA, RENDER, WORLD, PALETTE, FLIGHT, DEV, MENU, HIVE } from './config.js';
+import { CAMERA, RENDER, WORLD, PALETTE, FLIGHT, DEV, MENU, HIVE, SKY } from './config.js';
 import { createLoop } from './core/loop.js';
 import { input, initInput } from './core/input.js';
 import { loadAssets } from './core/assets.js';
@@ -12,6 +12,7 @@ import { createMenu } from './ui/menu.js';
 import { createLobby } from './ui/lobby.js';
 import { createAudio } from './audio/index.js';
 import { createNet } from './net/index.js';
+import { seasonAt } from './net/offline.js';
 
 const canvas = document.getElementById('app');
 const loadingEl = document.getElementById('loading');
@@ -310,7 +311,20 @@ async function boot() {
   let netInfo = null;
   let bankSnapshot = null;
   let season = null;
+  let timeOfDay = SKY.defaultTimeOfDay;
+  const soloEpoch = Date.now();
   const remotes = new Map();
+
+  // World time: the net clock when a session exists, otherwise this machine's.
+  // Time of day is derived from it, so it advances offline and agrees between players.
+  function worldNow() {
+    return net && net.world && typeof net.world.now === 'function' ? net.world.now() : Date.now();
+  }
+
+  function timeOfDayAt(nowMs) {
+    const span = SKY.dayLengthMs > 0 ? SKY.dayLengthMs : 1;
+    return ((nowMs / span) % 1 + 1 + SKY.defaultTimeOfDay) % 1;
+  }
   let menuAngle = MENU.backdrop.startAngle;
 
   function applySettings(settings) {
@@ -459,7 +473,8 @@ async function boot() {
   });
 
   loop.onRender((alpha, dt, elapsed) => {
-    if (sky && typeof sky.update === 'function') sky.update(dt, camera.position, elapsed);
+    timeOfDay = timeOfDayAt(worldNow());
+    if (sky && typeof sky.update === 'function') sky.update(dt, timeOfDay, camera.position);
     if (weather) {
       if (typeof weather.setIndoor === 'function') {
         weather.setIndoor(portal ? portal.state.insideness : 0);
@@ -486,6 +501,10 @@ async function boot() {
         season = net.world.seasonPhase();
         if (window.hollowtree) window.hollowtree.season = season.name;
       }
+    } else {
+      // Offline the calendar still turns — same maths, this machine's clock as the epoch.
+      season = seasonAt(worldNow(), soloEpoch);
+      if (window.hollowtree) window.hollowtree.season = season.name;
       for (const [uid, visual] of remotes) {
         const peer = net.peers.get(uid);
         if (!peer || !peer.hasMotion || !visual) continue;
@@ -510,7 +529,7 @@ async function boot() {
       speed: typeof flight.speed === 'number' ? flight.speed : flight.velocity.length(),
       swarmSize: 0,
       season: (season && season.name) || 'summer',
-      timeOfDay: sky && typeof sky.timeOfDay === 'number' ? sky.timeOfDay : 0.5,
+      timeOfDay,
       position: flight.position,
       gathering: gather ? gather.state.charge : 0,
     });

@@ -486,3 +486,64 @@ time-dependent* values with absolute equality, so in a throttled tab they can di
 the two reads (last seen: 3.807 vs 3.843 — 0.036, exactly 0.12 s at 0.3/s). Tolerances need deriving at read time.
 Recorded rather than chased further; the session had already spent three rounds on environment-versus-product
 confusion and the product evidence above is independent of it.
+
+## Shared flower reserves — r11, and a real defect the tolerance fix uncovered
+
+Chasing the last "harness artifact" turned up a genuine product bug. Between a drain committing and its echo
+returning, `hasEntry` was still 0 — which correctly means "nobody ever drained this flower", i.e. **full**. So a bloom
+the queen had just stripped sprang back to 6.000 for a whole round trip and then wilted again: invisible at 50 ms,
+glaring on a slow link. `pump()` now adopts its own commit as the record until the server's stamp overwrites it.
+
+The builder's note on how it caught this is the more valuable half: **its first guard passed against the broken
+code**, because the local driver emits inside its transaction so the echo always beats the promise and the branch
+never executed. A guard that cannot fail is not a guard. It rebuilt the test with a driver whose drain resolves
+before the subscription fires and demonstrated both directions:
+
+```
+pre-fix:   highest reading before the echo: 6.000  -> FAIL  the bloom sprang back to full
+post-fix:  highest reading before the echo: 3.000  -> PASS  the bloom stayed drained
+```
+
+Final: **r11 = 43 passed, 0 failed**, three consecutive runs; 38/0 under a 4 s clamp at 200x throttle;
+`net-node` 49/0 and `net-logic` 27/0 clean at idle. Cost 0.50 ms/frame with all 1050 flowers tracked.
+
+**Correction to my own "known limitation" entry above.** I recorded the residual as "the harness is throttle
+sensitive". The builder's framing is sharper and correct: every one of the last three failures had the same root
+cause — a constant where a time-derived bound belonged. Two of those constants were the harness's own and one
+produced a false accusation against the transaction. The durable rule is narrower and more useful:
+**never compare a time-derived value against a fixed number.** Three separate bugs, one rule.
+
+## Round 1 — audio and weather (independent Critic, closing a disclosed topology gap)
+
+- Critic identity: fresh-context Critic. Ran both subsystems itself (Node + a three.js shim for weather, a stub
+  AudioContext and stub fetch for audio) rather than reading only.
+- Verdict: **REJECT**, confidence high. Weighted **audio 65 / weather 85**.
+- Gates: G1 PASS (36 files, 36 credit rows, zero orphans either way, no duplicate hashes), G2 PASS (determinism
+  proved three ways, including 108 000 lockstep `update()` frames over 3 h with 40 identical lightning strikes —
+  a path the authors' own harness never tested), **G3 FAIL for audio** (10.18 B/frame from four `Object.keys()`
+  calls in the hot path) / PASS for weather (2.35 B/frame, nothing retained), G4 PASS (every fetch failing, and
+  Web Audio absent: module still constructs, 6000 frames complete, exactly one warning per file), G5 PASS
+  (`setIndoor` verified on instance counts, not `visible`: rain 3584 -> 0, splash 112 -> 0, fog 4 -> 0, wind 1.68 -> 0).
+
+**The finding that matters: the audio's headline behaviours are dead at the wiring, and the wiring is mine.**
+- `swarmSize: 0` was hardcoded into the only `audio.update` call, so the whole swarm-scaling path and the two
+  `bee-swarm` voices (static gain 0.0 by design) can never sound. "A big swarm is audibly big" — the master prompt's
+  own words — was not true in any real session.
+- `sky.timeOfDay` does not exist on `createSky`, so the day/night crossfade always got the 0.5 fallback, and
+  `sky.update(dt, camera.position, elapsed)` put a Vector3 in the `timeOfDay` slot so sky time never advanced either.
+- `setHornets` has no call site outside its own definition; `season` was only assigned inside `if (net)`.
+
+Fixed by me this round: time of day is now derived from the world clock (`SKY.dayLengthMs`, 45 real minutes per
+in-game day) and passed to both `sky.update` and `audio.update`, so the light moves and the ambience crossfades;
+season is now computed offline too via `seasonAt(worldNow(), soloEpoch)`. Verified in-engine: season reads `spring`
+with no session, the sun responds across the cycle (elevation 41.5 at night vs 98.1 at noon, intensity 1.75 vs 2.35)
+and advances frame to frame, zero console errors on a fresh tab.
+
+Not fixed, and honestly out of scope rather than broken: `swarmSize` and `setHornets` have no producer because the
+swarm (M3) and hornets (M6) do not exist yet. The Critic could not know that. They must be connected the day those
+systems land — recorded here so it is not forgotten.
+
+Also open: weather reads `Date.now()` rather than the net layer's server-corrected clock (measured 28 % kind
+disagreement at 3 minutes of client clock offset), and audio's fallback thunder scheduler stays live during `rain`
+phases because `setDriven()` is only reached when a preset has non-zero lightning — so clients hear thunder that
+nobody else hears and that no flash accompanies.

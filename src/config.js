@@ -137,6 +137,11 @@ export const SKY = {
   sunAzimuth: 2.25,
   sunDistance: 160,
   defaultTimeOfDay: 0.58,
+  // One in-game day in real milliseconds. Derived from the world clock, so every
+  // client agrees on the light without syncing anything. A season is two real days
+  // (NET.season), so this gives roughly 64 dawns per season — short enough that a
+  // 20-minute visit sees the light move, long enough that it is not a strobe.
+  dayLengthMs: 45 * 60 * 1000,
   horizonSoftness: 0.72,
   glowStrength: 0.55,
   discSharpness: 900.0,

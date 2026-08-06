@@ -276,19 +276,100 @@ async function caseShared(t) {
     arrived && Math.abs(entry.a - (DAISY.reserve - 2.5)) < 1e-6,
     entry ? `a=${entry.a.toFixed(3)} of ${DAISY.reserve}, stamped d=${entry.d}` : 'no record');
 
+  // Each value is read at its own instant, and a derived reserve is a function of time — so
+  // the tolerance is computed from the measured gap between the two reads rather than being
+  // a constant. Each field caches the world clock for up to 30 ms, which is why the gap gets
+  // that window added to it before being turned into units of regrowth.
+  const clockSlack = (gapSec) => (gapSec + 0.08) * SPEC.regrowth + 1e-3;
+
   frames(fa, 12);
+  const tA = T(nb);
+  const vA = fa.reserveOf(0);
   frames(fb, 12);
-  const want = derive(entry, SPEC, T(nb));
-  t.check('the draining client agrees with the record', Math.abs(fa.reserveOf(0) - want) < 0.05,
-    `${fa.reserveOf(0).toFixed(3)} vs ${want.toFixed(3)}`);
-  t.check('the other client agrees with the record', Math.abs(fb.reserveOf(0) - want) < 0.05,
-    `${fb.reserveOf(0).toFixed(3)} vs ${want.toFixed(3)}`);
-  t.check('both queens see the same flower', Math.abs(fa.reserveOf(0) - fb.reserveOf(0)) < 0.02,
-    `${fa.reserveOf(0).toFixed(3)} / ${fb.reserveOf(0).toFixed(3)}`);
+  const tB = T(nb);
+  const vB = fb.reserveOf(0);
+
+  const wantA = derive(entry, SPEC, tA);
+  const wantB = derive(entry, SPEC, tB);
+  t.check('the draining client agrees with the record', Math.abs(vA - wantA) <= clockSlack(0.05),
+    `${vA.toFixed(3)} vs ${wantA.toFixed(3)}`);
+  t.check('the other client agrees with the record', Math.abs(vB - wantB) <= clockSlack(0.05),
+    `${vB.toFixed(3)} vs ${wantB.toFixed(3)}`);
+
+  const gap = Math.abs(tB - tA) / 1000;
+  const slack = clockSlack(gap);
+  t.check('both queens see the same flower', Math.abs(vA - vB) <= slack,
+    `${vA.toFixed(3)} / ${vB.toFixed(3)} — apart by ${Math.abs(vA - vB).toFixed(4)}, and ${gap.toFixed(2)} s`
+    + ` between the two reads permits ${slack.toFixed(4)} at ${SPEC.regrowth}/s`);
 
   w.stop();
   fa.dispose(); fb.dispose(); na.dispose(); nb.dispose();
   await sleep(200);
+}
+
+// Between a drain committing and its echo arriving, the draining client holds a flower that
+// the shared record does not yet describe. Read naively that means "nobody has ever drained
+// this one" — which is full — so the bloom the queen just stripped springs back to full for a
+// round trip and then wilts again. It is invisible on a fast connection and glaring on a slow
+// one, which is exactly the class of bug a throttled pane is good at exposing.
+// The local driver emits inside its transaction, so its echo always beats the promise and
+// this branch never runs on it — a version of this case built on the local driver passed
+// against the broken code, which is worth remembering: a guard that cannot fail is not a
+// guard. This one supplies a net whose drain resolves before the subscription fires, which
+// any transport with a slower confirm path can do, and pins the branch directly.
+function lateEchoNet() {
+  const store = new Map();
+  let cb = null;
+  const grow = (e, spec) => {
+    if (!e || !e.d) return spec.max;
+    const el = (Date.now() - e.d) / 1000 - spec.regrowDelay;
+    return Math.min(spec.max, e.a + Math.max(0, el) * spec.regrowth);
+  };
+  return {
+    world: { now: () => Date.now() },
+    flowers: {
+      amount: (id, spec) => (store.has(id) ? grow(store.get(id), spec) : spec.max),
+      async drain(id, want, spec) {
+        const have = store.has(id) ? grow(store.get(id), spec) : spec.max;
+        const taken = Math.min(have, want);
+        store.set(id, { a: have - taken, d: Date.now() });
+        return taken; // resolves with no echo yet
+      },
+      subscribe(fn) { cb = fn; return () => { cb = null; }; },
+    },
+    flushEcho() { for (const [id, e] of store) if (cb) cb(id, { ...e }); },
+  };
+}
+
+async function caseNoSpringback(t) {
+  section('a drained bloom never springs back while its echo is in flight');
+  const field = makeField();
+  const net = lateEchoNet();
+  field.attachNet(net);
+
+  let credited = null;
+  field.drain(0, 3, (s) => { credited = s; });
+  const paid = await t.until(() => credited !== null, 4000, false);
+  t.check('the drain is credited before any echo arrives', paid && Math.abs(credited.taken - 3) < 1e-9,
+    credited ? `took ${credited.taken.toFixed(3)}` : 'no callback');
+
+  // Frames in the window where the shared record does not yet describe this flower. Read
+  // naively that means "never drained", which means full.
+  let peak = 0;
+  for (let k = 0; k < 30; k++) {
+    field.update(1 / 60, ORIGIN);
+    peak = Math.max(peak, field.reserveOf(0));
+  }
+  t.check('the bloom stays drained through the echo window', peak < DAISY.reserve - 0.5,
+    `highest of 30 frames was ${peak.toFixed(3)} — a springback reads ${DAISY.reserve.toFixed(3)}, the stripped value is ${(DAISY.reserve - 3).toFixed(3)}`);
+
+  net.flushEcho();
+  field.update(1 / 60, ORIGIN);
+  t.check('and the echo confirms the same value it was already showing',
+    Math.abs(field.reserveOf(0) - (DAISY.reserve - 3)) < 0.05,
+    `${field.reserveOf(0).toFixed(3)} vs ${(DAISY.reserve - 3).toFixed(3)}`);
+
+  field.dispose();
 }
 
 async function caseContention(t) {
@@ -643,6 +724,7 @@ const cases = [
   { name: 'stable ids', fn: caseIds, budget: 20000 },
   { name: 'transport', fn: caseTransport, budget: 30000 },
   { name: 'shared depletion', fn: caseShared, budget: 30000 },
+  { name: 'no springback', fn: caseNoSpringback, budget: 30000 },
   { name: 'contention', fn: caseContention, budget: 30000 },
   { name: 'regrowth', fn: caseRegrowth, budget: 40000 },
   { name: 'untouched reads full', fn: caseUntouchedFull, budget: 30000 },
@@ -686,7 +768,7 @@ async function runCase(entry) {
   const started = now();
   // Revision stamp: if this line is missing or older than the one in the report you were
   // sent, the browser served a cached copy of this page — hard-reload before reading it.
-  log('INFO  page revision r9 · timing-proof, bounded waits, breadcrumbs · 12 cases');
+  log('INFO  page revision r11 · timing-proof, bounded waits, breadcrumbs · 13 cases');
   log(`INFO  ${FLOWERS.count} flowers · local driver · ${NET.local.latencyMs}±${NET.local.latencyJitterMs} ms simulated latency`);
   const probe = now();
   for (let k = 0; k < 3; k++) await sleep(25);

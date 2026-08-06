@@ -622,8 +622,17 @@ export function createFlowers(scene, terrain) {
       if (taken > 0) {
         // If our own write already echoed back while this was in flight, the shared entry
         // is newer than anything we could compute — subtracting again would double-count.
-        if (echoSeq[i] === seqAtSend) applyAmount(i, reserve[i] - taken);
-        else applyAmount(i, amountOf(i));
+        if (echoSeq[i] === seqAtSend) {
+          const left = Math.max(0, reserve[i] - taken);
+          // Adopt our own commit as the record until the echo confirms it. Without this the
+          // very next frame reads "no entry for this flower" — which correctly means "nobody
+          // has ever drained it" — and springs the bloom back to full for a whole round trip.
+          // The stamp is a hair early; the echo overwrites it with the server's own moments later.
+          hasEntry[i] = 1;
+          netStored[i] = left;
+          netDrainedAt[i] = serverNow();
+          applyAmount(i, left);
+        } else applyAmount(i, amountOf(i));
         const cb = pendingCb[i];
         if (cb) cb(makeScoop(i, taken));
       }
