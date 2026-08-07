@@ -382,7 +382,7 @@ export const FLOWER_SPECIES = [
     regrowDelay: 9.0,
     scale: 1.35,
     petals: 0,
-    model: '',
+    model: 'flower-spruce.glb',
     headAnchor: 'head',
     height: 7.2,
     headHeight: 4.6,
