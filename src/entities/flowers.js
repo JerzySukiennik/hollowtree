@@ -68,7 +68,37 @@ function PLACEHOLDER_head(buf, cx, cz, y, radius, seg, petal, core) {
   for (let i = 0; i < seg; i++) idx.push(base, base + 1 + ((i + 1) % seg), base + 1 + i);
 }
 
+// A conifer sapling: a bare bole with tiered skirts of needles and a bead of resin at
+// the top of the trunk. Same buffer contract as the flower builder, so the instanced
+// field, depletion, wilt and picking all work on it untouched.
+function PLACEHOLDER_coniferGeometry(species) {
+  const c = species.colors;
+  const needle = new THREE.Color(c.petal);
+  const needleTip = new THREE.Color(c.tip || c.petal);
+  const bead = new THREE.Color(c.core);
+  const bark = new THREE.Color(c.stem);
+  const buf = newBuffer();
+  const h = species.height;
+  const tiers = 4;
+
+  PLACEHOLDER_ribbon(buf, 0, 0, 0, 0, 0, h, h * 0.03, bark);
+
+  for (let t = 0; t < tiers; t++) {
+    const k = t / (tiers - 1);
+    // Widest skirt low, tightest at the crown — the silhouette that reads "conifer".
+    const y = h * (0.26 + k * 0.62);
+    const radius = species.headRadius * (1.05 - k * 0.62);
+    const tint = t === tiers - 1 ? needleTip : needle;
+    PLACEHOLDER_head(buf, 0, 0, y, radius, 6, tint, needle);
+  }
+
+  // The resin bead is what the queen actually comes for, so it is the one warm accent.
+  PLACEHOLDER_head(buf, 0, 0, h * 0.995, species.headRadius * 0.2, 5, bead, bead);
+  return finalize(buf);
+}
+
 function PLACEHOLDER_flowerGeometry(species) {
+  if (species.geometry === 'conifer') return PLACEHOLDER_coniferGeometry(species);
   const c = species.colors;
   const petal = new THREE.Color(c.petal);
   const core = new THREE.Color(c.core || c.tip);
@@ -543,9 +573,11 @@ export function createFlowers(scene, terrain) {
     const share = taken / reserveMax[i];
     return {
       taken,
-      pollen: species.pollen * share,
-      nectar: species.nectar * share,
-      resin: 0,
+      pollen: (species.pollen || 0) * share,
+      nectar: (species.nectar || 0) * share,
+      // Resin was hardcoded to 0 here, which silently made every comb cell
+      // unbuildable: all eight types cost resin and nothing in the game produced it.
+      resin: (species.resin || 0) * share,
       speciesId: species.id,
       index: i,
     };

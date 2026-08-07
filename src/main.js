@@ -626,6 +626,9 @@ async function boot() {
   window.hollowtree = {
     renderer, scene, camera, terrain, sky, grass, flight, rig, queen, input, loop, assets,
     hive, menu, audio, weather,
+    // Exposed for diagnosis: without these, checking whether a scoop credits the bank
+    // means waiting on real frames, which a backgrounded tab throttles ~126x.
+    gather, resources, flowers,
     enterWorld,
     get mode() { return mode; },
     get session() { return session; },
