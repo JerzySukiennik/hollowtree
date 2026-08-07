@@ -632,7 +632,7 @@ async function boot() {
     audio.update(dt, {
       insideness: portal ? portal.state.insideness : 0,
       speed: typeof flight.speed === 'number' ? flight.speed : flight.velocity.length(),
-      swarmSize: 0,
+      swarmSize: swarm ? swarm.count : 0,
       season: (season && season.name) || 'summer',
       timeOfDay,
       position: flight.position,
