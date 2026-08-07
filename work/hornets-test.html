@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hollowtree — hornets self test</title>
+<style>
+  html, body { background: #14100c; color: #f6e9cf; margin: 0; }
+  body { padding: 22px 26px; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h1 { font-size: 13px; letter-spacing: .18em; text-transform: uppercase; opacity: .6; margin: 0 0 14px; font-weight: 500; }
+  pre { white-space: pre-wrap; margin: 0; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<h1>Hollowtree · M6 hornets · seasonal raid, structural defence, single-owner sim</h1>
+<pre id="report">running…</pre>
+<script type="module">
+import * as THREE from 'three';
+import { HORNETS } from '../src/config.hornets.js';
+import { NET } from '../src/config.net.js';
+import {
+  createHornets, raidForSeason, timelineOf, seasonIndexAt, resolveDefence, readComb,
+} from '../src/entities/hornets.js';
+
+const out = document.getElementById('report');
+const lines = [];
+let passed = 0, failed = 0;
+function log(t) { lines.push(t); out.textContent = lines.join('\n'); }
+const section = (t) => { log(''); log(`— ${t}`); };
+function ok(cond, name, detail) {
+  if (cond) { passed++; log(`PASS  ${name}${detail ? '  ' + detail : ''}`); }
+  else { failed++; log(`FAIL  ${name}${detail ? '  ' + detail : ''}`); }
+  return cond;
+}
+const nf = (v) => (Math.round(v * 100) / 100);
+
+// ---------------------------------------------------------------- environment probe
+//
+// A hidden tab in this pane is throttled hard. Every deadline below is expressed as a
+// MULTIPLE of the measured factor, never as a fixed millisecond constant — comparing a
+// time-derived value against a constant is what produced three false failures here before.
+
+async function probeThrottle() {
+  const N = 24;
+  const t0 = performance.now();
+  for (let i = 0; i < N; i++) await new Promise((r) => setTimeout(r, 0));
+  const perHop = (performance.now() - t0) / N;
+  // An unthrottled setTimeout(0) hop is ~0.3–1.5 ms in every browser here.
+  const factor = Math.max(1, perHop / 1.0);
+  return { perHop, factor };
+}
+
+function deadline(baseMs, factor) { return Math.max(baseMs, baseMs * factor); }
+
+// ---------------------------------------------------------------- fakes
+//
+// The system takes (scene, terrain, comb, net, flight). All four are stubbed so the test
+// controls the clock, the nest and the lease exactly, and so no dev server state is touched.
+
+function fakeTerrain() { return { getHeight: () => 0, colliders: [] }; }
+
+// A comb stub with exactly the surface hornets.js reads: effects, staffing, stores, cells.
+function fakeComb(spec) {
+  const cells = new Map();
+  let n = 0;
+  const add = (type, routeDist) => { cells.set(`${n++},0,0`, { type, routeDist, done: true, owner: 'me' }); };
+  // A queen's chamber right by the mouth — the raid must never take it.
+  add('queen', 1);
+  for (let i = 0; i < (spec.stores || 8); i++) add('honey', (spec.corridorSteps || 0) + (i % 2));
+  for (let i = 0; i < (spec.pollen || 4); i++) add('pollen', (spec.corridorSteps || 0) + 2);
+  if (spec.guardCells) for (let i = 0; i < spec.guardCells; i++) add('guard', 1);
+  if (spec.trapCells) for (let i = 0; i < spec.trapCells; i++) add('trap', 2);
+  if (spec.constrictor) add('constrictor', 0);
+
+  return {
+    stores: { honey: spec.honey ?? 400 },
+    staffing: spec.guardStaffing !== undefined ? { guard: spec.guardStaffing } : {},
+    cells,
+    effects: {
+      hornetSlow: spec.hornetSlow || 0,
+      trapCharges: spec.trapCharges || 0,
+      guardSlots: spec.guardSlots || 0,
+      doneCount: cells.size,
+    },
+  };
+}
+
+// One shared world for N clients: one clock, one lease holder, one 'hornets' key.
+function fakeWorld(epoch) {
+  const store = new Map();
+  const subs = new Map();
+  const w = {
+    t: epoch,
+    epoch,
+    owner: 'A',
+    now() { return w.t; },
+    advance(ms) { w.t += ms; },
+    set(path, value) {
+      store.set(path, value);
+      const list = subs.get(path) || [];
+      for (const cb of list) cb(value);
+      return Promise.resolve();
+    },
+    get(path) { return Promise.resolve(store.get(path) ?? null); },
+    subscribe(path, cb) {
+      if (!subs.has(path)) subs.set(path, []);
+      subs.get(path).push(cb);
+      if (store.has(path)) cb(store.get(path));
+      return () => {
+        const list = subs.get(path);
+        const i = list.indexOf(cb);
+        if (i !== -1) list.splice(i, 1);
+      };
+    },
+    peek(path) { return store.get(path) ?? null; },
+  };
+  return w;
+}
+
+function fakeNet(world, uid) {
+  return {
+    world: {
+      now: () => world.now(),
+      get epoch() { return world.epoch; },
+      set: (p, v) => world.set(p, v),
+      get: (p) => world.get(p),
+      subscribe: (p, cb) => world.subscribe(p, cb),
+    },
+    authority: { isMine: () => world.owner === uid, owner: () => world.owner },
+  };
+}
+
+function fakeFlight() { return { position: new THREE.Vector3(0, -9999, 0), velocity: new THREE.Vector3() }; }
+
+// Drives a set of clients through virtual time in fixed steps. No real waiting: the whole
+// timeline is virtual, so nothing here can hang.
+function run(world, clients, seconds, stepMs, hook) {
+  const steps = Math.ceil((seconds * 1000) / stepMs);
+  for (let s = 0; s < steps; s++) {
+    world.advance(stepMs);
+    for (const c of clients) c.update(stepMs / 1000, world.now());
+    if (hook) hook(s, world.now());
+  }
+}
+
+// ---------------------------------------------------------------- the run
+
+(async function main() {
+  const probe = await probeThrottle();
+  log(`environment  setTimeout(0) hop ${nf(probe.perHop)} ms  →  throttle factor ×${nf(probe.factor)}`);
+  log(`             every deadline below is scaled by that factor, never by a constant`);
+  const HARD_DEADLINE = deadline(4000, probe.factor);
+  const startedAt = performance.now();
+  const budgetLeft = () => HARD_DEADLINE - (performance.now() - startedAt);
+
+  const scene = new THREE.Scene();
+  const terrain = fakeTerrain();
+
+  // ---- pick the first season the seed actually raids, so the test drives a real event
+  section('schedule derivation (pure, no clock, no network)');
+  let target = null;
+  for (let s = 0; s < 32 && !target; s++) {
+    const r = raidForSeason(s, HORNETS.seed);
+    if (r) target = r;
+  }
+  ok(!!target, 'seed schedules a raid within 32 seasons',
+    target ? `season ${target.season} (${target.name}), ${target.count} hornets` : '');
+  if (!target) { finish(); return; }
+
+  // determinism: same inputs, same answer, every time
+  const again = raidForSeason(target.season, HORNETS.seed);
+  ok(again && again.count === target.count && again.offsetSec === target.offsetSec,
+    'raidForSeason is pure', `count ${target.count}, offset ${nf(target.offsetSec)}s`);
+
+  // spring is free by design
+  let springRaids = 0;
+  for (let s = 0; s < 200; s++) if (raidForSeason(s, HORNETS.seed) && (s % 4) === 0) springRaids++;
+  ok(springRaids === 0, 'spring is never raided', `${springRaids} spring raids in 200 seasons`);
+
+  const seasonMs = NET.season.lengthSec * 1000;
+  const EPOCH = 1700000000000;
+  const line = timelineOf(target, EPOCH);
+  ok(seasonIndexAt(line.arriveAt, EPOCH) === target.season,
+    'raid lands inside its own season', `index ${seasonIndexAt(line.arriveAt, EPOCH)}`);
+
+  // ---- warning lead time
+  section('the announcement');
+  const leadSec = (line.arriveAt - line.warnAt) / 1000;
+  ok(leadSec === HORNETS.timing.warnLeadSec && leadSec >= HORNETS.timing.approachSec * 2,
+    'warning fires far enough ahead to be actionable',
+    `lead ${leadSec}s, approach ${HORNETS.timing.approachSec}s → ${nf(leadSec / HORNETS.timing.approachSec)}× the flight in`);
+
+  // ---------------------------------------------------------------- case 1: one simulator
+  section('exactly one client simulates');
+  const world = fakeWorld(EPOCH);
+  world.t = line.warnAt - 30000;
+  const A = mk(world, 'A'), B = mk(world, 'B'), C = mk(world, 'C');
+  function mk(w, uid) {
+    return createHornets({
+      scene, terrain, comb: fakeComb({ honey: 400 }), net: fakeNet(w, uid), flight: fakeFlight(),
+      entrance: new THREE.Vector3(0, 16, -22),
+    });
+  }
+  const clients = [A, B, C];
+  const warns = { A: 0, B: 0, C: 0 };
+  A.onWarning(() => warns.A++); B.onWarning(() => warns.B++); C.onWarning(() => warns.C++);
+  const results = { A: null, B: null, C: null };
+  A.onRaidResult((r) => { results.A = r; }); B.onRaidResult((r) => { results.B = r; }); C.onRaidResult((r) => { results.C = r; });
+
+  world.owner = 'A';
+  // up to the end of the assault window (owner resolves at raidAt)
+  const toRaid = (line.raidAt + 500 - world.now()) / 1000;
+  run(world, clients, toRaid, 1000);
+
+  ok(A.stats.resolves === 1 && B.stats.resolves === 0 && C.stats.resolves === 0,
+    'only the lease holder decides the outcome',
+    `resolves A=${A.stats.resolves} B=${B.stats.resolves} C=${C.stats.resolves}`);
+  ok(B.stats.publishes === 0 && C.stats.publishes === 0,
+    'non-owners publish nothing', `publishes A=${A.stats.publishes} B=${B.stats.publishes} C=${C.stats.publishes}`);
+  ok(warns.A === 1 && warns.B === 1 && warns.C === 1,
+    'every client gets the announcement exactly once', `A${warns.A} B${warns.B} C${warns.C}`);
+  ok(!!results.B && !!results.C && results.B.honeyStolen === results.A.honeyStolen,
+    'observers receive the owner outcome, unchanged',
+    `A ${results.A && results.A.honeyStolen} / B ${results.B && results.B.honeyStolen} / C ${results.C && results.C.honeyStolen}`);
+  ok(A.state.phase === 'raid' && B.state.phase === 'raid',
+    'owner and observer agree on phase', `A=${A.state.phase} B=${B.state.phase}`);
+
+  // ---------------------------------------------------------------- case 2: handover
+  section('lease handover mid-raid');
+  const world2 = fakeWorld(EPOCH);
+  world2.t = line.inboundAt - 5000;
+  const D = mk(world2, 'A'), E = mk(world2, 'B');
+  const pair = [D, E];
+  world2.owner = 'A';
+  run(world2, pair, (line.arriveAt + HORNETS.timing.assaultSec * 500 - world2.now()) / 1000, 1000);
+  const midPhase = D.state.phase;
+  const midSeason = D.state.season;
+  const midArrive = D.state.nextRaidAt;
+  ok(midPhase === 'assault', 'raid is mid-assault before the handover', `phase ${midPhase}`);
+
+  world2.owner = 'B';                 // the tab that was simulating goes away
+  run(world2, pair, (line.raidAt + 1000 - world2.now()) / 1000, 1000);
+  ok(E.stats.resolves === 1 && D.stats.resolves === 0,
+    'the new owner resolves, the old one does not',
+    `D=${D.stats.resolves} E=${E.stats.resolves}`);
+  ok(E.state.season === midSeason && E.state.nextRaidAt === midArrive,
+    'the raid CONTINUES: same season, same arrival, no re-roll',
+    `season ${midSeason} → ${E.state.season}, arriveAt ${midArrive} → ${E.state.nextRaidAt}`);
+  ok(E.state.phase === 'raid' && D.state.phase === 'raid',
+    'no restart: phase went assault → raid across the handover', `${midPhase} → ${E.state.phase}`);
+
+  // ---------------------------------------------------------------- case 3: the claim
+  section('the milestone claim: a shaped nest is measurably weaker to raid');
+
+  function raidOnce(spec, uid) {
+    const w = fakeWorld(EPOCH);
+    w.t = line.inboundAt - 1000;
+    w.owner = uid;
+    const comb = fakeComb(spec);
+    const h = createHornets({
+      scene, terrain, comb, net: fakeNet(w, uid), flight: fakeFlight(),
+      entrance: new THREE.Vector3(0, 16, -22),
+    });
+    let res = null;
+    h.onRaidResult((r) => { res = r; });
+    run(w, [h], (line.raidAt + 1000 - w.now()) / 1000, 1000);
+    const snap = readComb(comb);
+    h.dispose();
+    return { res, snap, comb };
+  }
+
+  const bare = raidOnce({ honey: 400, stores: 8, corridorSteps: 0 }, 'A');
+  // A HALF-BUILT nest, scaled to this raid's size, so the comparison is graded rather than
+  // an all-or-nothing repel. The fortress case below covers the total repel separately.
+  const built = raidOnce({
+    honey: 400, stores: 8, corridorSteps: 5,
+    constrictor: true, hornetSlow: 0.3,
+    trapCells: 1, trapCharges: Math.max(1, Math.round(target.count * 0.2)),
+    guardCells: 1, guardSlots: Math.max(1, Math.round(target.count * 0.15)), guardStaffing: 1,
+  }, 'A');
+
+  ok(!!bare.res && !!built.res, 'both raids produced an outcome');
+  if (bare.res && built.res) {
+    log(`      undefended  ${target.count} hornets → ${bare.res.breachers} breachers, ` +
+        `${bare.res.honeyStolen} honey, ${bare.res.cellsDestroyed.length} cells`);
+    log(`      defended    ${target.count} hornets → ${built.res.breachers} breachers, ` +
+        `${built.res.honeyStolen} honey, ${built.res.cellsDestroyed.length} cells ` +
+        `(turned away ${built.res.turnedAway}, traps ${built.res.trapKills}, guards ${built.res.guardKills}, corridor -${nf(built.res.corridor * 100)}%)`);
+    ok(built.res.honeyStolen < bare.res.honeyStolen,
+      'the same seed steals LESS honey from the defended nest',
+      `${bare.res.honeyStolen} → ${built.res.honeyStolen} (−${nf(100 - 100 * built.res.honeyStolen / Math.max(1e-6, bare.res.honeyStolen))}%)`);
+    ok(built.res.cellsDestroyed.length < bare.res.cellsDestroyed.length,
+      'and destroys FEWER cells',
+      `${bare.res.cellsDestroyed.length} → ${built.res.cellsDestroyed.length}`);
+    ok(built.res.breachers < bare.res.breachers,
+      'fewer hornets get past the mouth', `${bare.res.breachers} → ${built.res.breachers}`);
+  }
+
+  // a fully shaped nest repels the raid by itself, with the player watching
+  const fortress = raidOnce({
+    honey: 400, stores: 8, corridorSteps: 8,
+    constrictor: true, hornetSlow: 0.9,
+    trapCells: 4, trapCharges: 20,
+    guardCells: 4, guardSlots: 10, guardStaffing: 1,
+  }, 'A');
+  ok(fortress.res && fortress.res.breachers === 0 && fortress.res.honeyStolen === 0,
+    'a well-shaped nest repels the raid by itself',
+    fortress.res ? `${fortress.res.breachers} breachers, ${fortress.res.honeyStolen} honey lost` : '');
+
+  // ---------------------------------------------------------------- case 4: the floor
+  section('a breach costs stores, never progress');
+  const r = bare.res;
+  ok(r && r.honeyStolen >= 0 && r.honeyStolen <= 400,
+    'honey stolen never exceeds what is in the bank', `${r && r.honeyStolen} of 400`);
+  ok(r && r.honeyStolen <= 400 * HORNETS.loss.honeyMaxFraction + 1e-6,
+    'and never more than the capped share', `cap ${400 * HORNETS.loss.honeyMaxFraction}, took ${r && r.honeyStolen}`);
+
+  const poor = raidOnce({ honey: 3, stores: 8, corridorSteps: 0 }, 'A');
+  ok(poor.res && poor.res.honeyStolen <= 3 && poor.res.honeyStolen >= 0,
+    'an almost-empty hive cannot go below zero', `honey 3 → stole ${poor.res && poor.res.honeyStolen}`);
+
+  const queenKeys = [];
+  for (const [k, c] of bare.comb.cells) if (c.type === 'queen') queenKeys.push(k);
+  const tookQueen = r.cellsDestroyed.some((k) => queenKeys.includes(k));
+  ok(!tookQueen, "the queen's chamber is never destroyed",
+    `${r.cellsDestroyed.length} cells lost, none of ${queenKeys.length} queen cells`);
+  ok(r.cellsDestroyed.length <= HORNETS.loss.maxCellsLost &&
+     r.cellsDestroyed.length <= Math.floor(bare.snap.doneCount * HORNETS.loss.maxCellFraction),
+    'cell loss is capped absolutely and as a fraction',
+    `${r.cellsDestroyed.length} ≤ min(${HORNETS.loss.maxCellsLost}, ${Math.floor(bare.snap.doneCount * HORNETS.loss.maxCellFraction)})`);
+  ok(new Set(r.cellsDestroyed).size === r.cellsDestroyed.length,
+    'no cell is reported destroyed twice');
+
+  // ---------------------------------------------------------------- case 5: contact
+  section('contact costs the load, nothing else');
+  const world3 = fakeWorld(EPOCH);
+  world3.t = line.arriveAt + 2000;
+  world3.owner = 'A';
+  const flight = fakeFlight();
+  const F = createHornets({
+    scene, terrain, comb: fakeComb({ honey: 400 }), net: fakeNet(world3, 'A'), flight,
+    entrance: new THREE.Vector3(0, 16, -22),
+  });
+  let contacts = 0, lastContact = null;
+  F.onContact((e) => { contacts++; lastContact = e; });
+  F.update(0.016, world3.now());                    // one frame to place the swarm
+  ok(F.state.phase === 'assault', 'swarm is at the mouth', `phase ${F.state.phase}`);
+  // Fly the queen onto a hornet's actual track, not the mouth centre — they circle it.
+  for (let i = 0; i < 30 && contacts === 0; i++) {
+    flight.position.copy(F.positions[0]);
+    world3.advance(16);
+    F.update(0.016, world3.now());
+  }
+  ok(contacts >= 1, 'onContact fires when the queen touches a hornet',
+    contacts ? `at ${nf(lastContact.at.x)},${nf(lastContact.at.y)},${nf(lastContact.at.z)}` : 'no contact in 30 frames');
+  const afterFirst = contacts;
+  for (let i = 0; i < 30; i++) { world3.advance(16); F.update(0.016, world3.now()); }
+  ok(contacts === afterFirst, 'a cooldown stops contact from firing every frame',
+    `${contacts} contacts across ${HORNETS.contact.cooldownSec}s cooldown`);
+  ok(!('damage' in (lastContact || {})) && !('health' in (lastContact || {})),
+    'contact carries no combat payload — only place and phase',
+    `keys: ${Object.keys(lastContact || {}).join(', ')}`);
+  F.dispose();
+
+  // ---------------------------------------------------------------- case 6: budget
+  section('render budget');
+  const world4 = fakeWorld(EPOCH);
+  world4.t = line.arriveAt + 1000;
+  world4.owner = 'A';
+  const G = createHornets({
+    scene, terrain, comb: fakeComb({ honey: 400 }), net: fakeNet(world4, 'A'), flight: fakeFlight(),
+    entrance: new THREE.Vector3(0, 16, -22),
+  });
+  G.update(0.016, world4.now());
+  const meshes = G.group.children;
+  ok(meshes.every((m) => m.isInstancedMesh), 'every hornet mesh is an InstancedMesh',
+    `${meshes.length} meshes: ${meshes.map((m) => m.count).join('/')}`);
+  ok(meshes.every((m) => !m.castShadow && !m.receiveShadow), 'no hornet casts or receives a shadow');
+  ok(meshes.every((m) => m.instanceMatrix.count <= HORNETS.maxAlive * 2),
+    'instance buffers are bounded by config', `maxAlive ${HORNETS.maxAlive}`);
+  const t0 = performance.now();
+  for (let i = 0; i < 600; i++) { world4.advance(16); G.update(0.016, world4.now()); }
+  const perFrame = (performance.now() - t0) / 600;
+  const frameBudget = deadline(2.5, probe.factor);   // a tenth of a 40 fps frame, scaled
+  ok(perFrame < frameBudget, 'update stays far inside a 40 fps frame',
+    `${nf(perFrame)} ms/frame vs scaled budget ${nf(frameBudget)} ms (25 ms = 40 fps)`);
+  G.dispose();
+  ok(G.group.parent === null, 'dispose detaches the group');
+
+  // ---------------------------------------------------------------- case 7: idle
+  section('outside a raid the system is inert');
+  const world5 = fakeWorld(EPOCH);
+  world5.t = EPOCH + 60000;   // early spring, year 0
+  world5.owner = 'A';
+  const H = createHornets({
+    scene, terrain, comb: fakeComb({ honey: 400 }), net: fakeNet(world5, 'A'), flight: fakeFlight(),
+    entrance: new THREE.Vector3(0, 16, -22),
+  });
+  H.update(0.016, world5.now());
+  ok(H.state.phase === 'idle' && H.state.threat === 0 && !H.group.visible,
+    'no raid running in early spring', `phase ${H.state.phase}, threat ${H.state.threat}`);
+  ok(H.state.nextRaidAt > world5.now(),
+    'but the next raid is already on the calendar',
+    `${nf((H.state.nextRaidAt - world5.now()) / 3600000)} h out, season ${H.state.season}`);
+  // Before the world epoch lands, every derived instant is meaningless — stay inert.
+  const world6 = fakeWorld(0);
+  world6.t = Date.now();
+  world6.owner = 'A';
+  const I = createHornets({
+    scene, terrain, comb: fakeComb({ honey: 400 }), net: fakeNet(world6, 'A'), flight: fakeFlight(),
+    entrance: new THREE.Vector3(0, 16, -22),
+  });
+  let earlyWarns = 0;
+  I.onWarning(() => earlyWarns++);
+  for (let i = 0; i < 20; i++) I.update(0.05, world6.now());
+  ok(I.state.phase === 'idle' && earlyWarns === 0 && I.stats.resolves === 0,
+    'no epoch yet → no phantom raid, no phantom warning',
+    `phase ${I.state.phase}, warnings ${earlyWarns}, resolves ${I.stats.resolves}`);
+  world6.epoch = EPOCH; world6.t = line.warnAt + 1000;
+  I.update(0.05, world6.now());
+  ok(I.state.phase === 'warning' && earlyWarns === 1,
+    'and the moment the epoch lands the calendar snaps into place',
+    `phase ${I.state.phase}, warnings ${earlyWarns}`);
+  I.dispose();
+
+  const sched = H.schedule();
+  ok(sched && sched.arriveAt === H.state.nextRaidAt,
+    'schedule() agrees with the derived state', sched ? `season ${sched.season}` : 'null');
+  H.dispose();
+
+  ok(budgetLeft() > 0, 'whole suite finished inside its scaled deadline',
+    `${nf(performance.now() - startedAt)} ms of ${nf(HARD_DEADLINE)} ms`);
+
+  A.dispose(); B.dispose(); C.dispose(); D.dispose(); E.dispose();
+  finish();
+
+  function finish() {
+    log('');
+    log(`${failed === 0 ? 'ALL PASS' : 'FAILURES'} — ${passed} passed, ${failed} failed`);
+  }
+})().catch((err) => {
+  failed++;
+  log('');
+  log(`FAIL  suite threw: ${err && err.stack ? err.stack : err}`);
+  log(`FAILURES — ${passed} passed, ${failed} failed`);
+});
+</script>
+</body>
+</html>

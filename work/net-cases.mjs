@@ -498,7 +498,10 @@ export function createSuite(env) {
     { name: 'motion', fn: caseMotion, budget: 45000 },
     { name: 'bank', fn: caseBank, budget: 45000 },
     { name: 'authority', fn: caseAuthority, budget: 60000 },
-    { name: 'frozen-owner', fn: caseFrozenOwner, budget: 90000 },
+    // The stall itself runs 2 x presenceStaleSec, so the budget has to be derived from
+    // that constant rather than fixed — at a hardcoded 90 s this case timed out on its
+    // own stall the moment presenceStaleSec was raised.
+    { name: 'frozen-owner', fn: caseFrozenOwner, budget: 2 * NET.rates.presenceStaleSec * 1000 + 30000 },
     { name: 'ghosts', fn: caseGhosts, budget: 30000 },
     { name: 'offline', fn: caseOffline, budget: 30000 },
   ];

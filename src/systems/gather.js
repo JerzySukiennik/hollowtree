@@ -24,7 +24,14 @@ export function createGather(flowers, resources, flight, hive) {
     hint: null,
     depositFlash: 0,
     lastDeposit: null,
+    // Collective gathering (M3): what the swarm brought in, kept apart from the
+    // queen's own scoops so the HUD can show that a bigger swarm really is faster.
+    swarmUnits: 0,
+    swarmRate: 0,
   };
+
+  let swarmWindow = 0;
+  let swarmSinceWindow = 0;
 
   let cooldown = 0;
 
@@ -75,8 +82,27 @@ export function createGather(flowers, resources, flight, hive) {
     state.full = next >= GATHER.basketCapacity - 1e-4;
   }
 
+  // The swarm's share of a bloom, credited through exactly the same room check as the
+  // queen's own scoop — the baskets are one pool, so a big swarm just fills them sooner.
+  function creditSwarm(scoop) {
+    if (!scoop) return;
+    const before = totalLoad();
+    credit(scoop);
+    const gained = totalLoad() - before;
+    if (gained > 0) {
+      state.swarmUnits += gained;
+      swarmSinceWindow += gained;
+    }
+  }
+
   function update(dt, input) {
     if (!(dt > 0)) return state;
+    swarmWindow += dt;
+    if (swarmWindow >= 0.5) {
+      state.swarmRate = swarmSinceWindow / swarmWindow;
+      swarmSinceWindow = 0;
+      swarmWindow = 0;
+    }
     if (cooldown > 0) cooldown = Math.max(0, cooldown - dt);
     if (state.depositFlash > 0) state.depositFlash = Math.max(0, state.depositFlash - dt);
 
@@ -151,5 +177,5 @@ export function createGather(flowers, resources, flight, hive) {
     return state;
   }
 
-  return { state, baskets, update, deposit, onDeposit };
+  return { state, baskets, update, deposit, onDeposit, credit, creditSwarm };
 }

@@ -2,10 +2,49 @@
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { FLOWERS, FLOWER_SPECIES, HIVE } from '../config.js';
-import { regrownAmount } from '../net/offline.js';
+import { FLOWERS, FLOWER_SPECIES, HIVE, ZONES } from '../config.js';
+import { regrownAmount, seasonAt } from '../net/offline.js';
 
 const loader = new GLTFLoader();
+
+// Bloom is derived from the year phase, never accumulated per frame, so every client
+// agrees and an absence of any length lands on the right answer. A window may wrap the
+// turn of the year (start 0.83, end 0.22); the span is measured forward from the start.
+export function bloomSpan(species) {
+  const b = species && species.bloom;
+  if (!b) return 1;
+  const span = b.end - b.start;
+  return span > 0 ? span : span + 1;
+}
+
+export function bloomOpenAt(species, yearT) {
+  if (!species) return 0;
+  if (species.evergreen) return 1;
+  const b = species.bloom;
+  if (!b) return 1;
+  const span = bloomSpan(species);
+  if (span >= 1) return 1;
+  let rel = (Number(yearT) || 0) - b.start;
+  rel -= Math.floor(rel);
+  if (rel > span) return 0;
+  const edge = Math.min(0.05, span * 0.28);
+  if (edge <= 0) return 1;
+  const ramp = Math.min(rel, span - rel) / edge;
+  return ramp >= 1 ? 1 : (ramp <= 0 ? 0 : ramp);
+}
+
+export function isInBloom(species, yearT) {
+  return bloomOpenAt(species, yearT) > 1e-3;
+}
+
+// Fraction of a year until this species next opens; 0 while it is already open.
+export function untilBloom(species, yearT) {
+  if (!species || species.evergreen || !species.bloom) return 0;
+  if (isInBloom(species, yearT)) return 0;
+  let d = species.bloom.start - (Number(yearT) || 0);
+  d -= Math.floor(d);
+  return d;
+}
 
 function rng(seed) {
   let s = seed >>> 0;
@@ -248,16 +287,41 @@ export function createFlowers(scene, terrain) {
   const headOf = new Float32Array(table.length);
   for (let s = 0; s < table.length; s++) headOf[s] = table[s].headHeight;
 
+  // Zone bands, resolved once per species. A species lives in its own ring and nowhere
+  // else, so walking outward is what changes what is underneath the queen.
+  const zoneList = ZONES.bands;
+  const zoneCX = ZONES.center.x;
+  const zoneCZ = ZONES.center.z;
+  const bandInner = new Float32Array(table.length);
+  const bandOuter = new Float32Array(table.length);
+  const zoneOf = new Uint8Array(table.length);
+  for (let s = 0; s < table.length; s++) {
+    const zi = Math.max(0, Math.min(zoneList.length - 1, table[s].zone | 0));
+    const inset = (zoneList[zi].outer - zoneList[zi].inner) * (ZONES.bandInset || 0);
+    zoneOf[s] = zi;
+    bandInner[s] = zoneList[zi].inner + inset;
+    bandOuter[s] = zoneList[zi].outer - inset;
+  }
+
+  // Uniform by area inside the ring, so a wide outer band does not bunch at its rim.
+  function radiusInBand(s, u) {
+    const a = bandInner[s] * bandInner[s];
+    const b = bandOuter[s] * bandOuter[s];
+    return Math.sqrt(a + u * (b - a));
+  }
+
   const clusters = [];
   for (let i = 0; i < FLOWERS.clusterCount; i++) {
+    const s = Math.floor(rand() * table.length);
     const a = rand() * Math.PI * 2;
-    const r = FLOWERS.radius * Math.sqrt(rand());
-    clusters.push({
-      x: Math.cos(a) * r,
-      z: Math.sin(a) * r,
-      species: Math.floor(rand() * table.length),
-    });
+    const r = radiusInBand(s, rand());
+    clusters.push({ x: zoneCX + Math.cos(a) * r, z: zoneCZ + Math.sin(a) * r, species: s });
   }
+  const clustersOf = [];
+  for (let s = 0; s < table.length; s++) clustersOf.push([]);
+  for (let i = 0; i < clusters.length; i++) clustersOf[clusters[i].species].push(clusters[i]);
+  // Bands reject far more candidates than an open disk did, so the budget grows with them.
+  const placementTries = Math.max(10, FLOWERS.placementTries * 3);
 
   const speciesOf = new Uint8Array(total);
   let assigned = 0;
@@ -341,20 +405,24 @@ export function createFlowers(scene, terrain) {
     let x = 0;
     let z = 0;
     let ok = false;
-    for (let t = 0; t < FLOWERS.placementTries && !ok; t++) {
-      if (rand() < FLOWERS.clusterShare) {
-        let c = clusters[Math.floor(rand() * clusters.length)];
-        for (let k = 0; k < 3 && c.species !== s; k++) c = clusters[Math.floor(rand() * clusters.length)];
+    for (let t = 0; t < placementTries && !ok; t++) {
+      const own = clustersOf[s];
+      if (own.length && rand() < FLOWERS.clusterShare) {
+        const c = own[Math.floor(rand() * own.length)];
         const ca = rand() * Math.PI * 2;
         const cr = FLOWERS.clusterRadius * Math.sqrt(rand());
         x = c.x + Math.cos(ca) * cr;
         z = c.z + Math.sin(ca) * cr;
       } else {
         const a = rand() * Math.PI * 2;
-        const r = FLOWERS.radius * Math.sqrt(rand());
-        x = Math.cos(a) * r;
-        z = Math.sin(a) * r;
+        const r = radiusInBand(s, rand());
+        x = zoneCX + Math.cos(a) * r;
+        z = zoneCZ + Math.sin(a) * r;
       }
+      const bx = x - zoneCX;
+      const bz = z - zoneCZ;
+      const bandSq = bx * bx + bz * bz;
+      if (bandSq < bandInner[s] * bandInner[s] || bandSq > bandOuter[s] * bandOuter[s]) continue;
       if (x * x + z * z < clearSq) continue;
       const dhx = x - HIVE.x;
       const dhz = z - HIVE.z;
@@ -363,6 +431,14 @@ export function createFlowers(scene, terrain) {
       const slope = Math.hypot(getHeight(x + 1.1, z) - h, getHeight(x, z + 1.1) - h) / 1.1;
       if (slope > FLOWERS.maxSlope) continue;
       ok = true;
+    }
+    // Never leak a rejected candidate into the field: a flower that could not find a legal
+    // spot is dropped anywhere inside its own ring rather than outside it.
+    if (!ok) {
+      const a = rand() * Math.PI * 2;
+      const r = radiusInBand(s, rand());
+      x = zoneCX + Math.cos(a) * r;
+      z = zoneCZ + Math.sin(a) * r;
     }
 
     fx[i] = x;
@@ -382,6 +458,35 @@ export function createFlowers(scene, terrain) {
     local[i] = counts[s];
     counts[s]++;
   }
+
+  // Bloom openness per species, derived from the year phase and refreshed at most a few
+  // times a second. Nothing here integrates dt, so a client that was away for three days
+  // is correct on its first frame back and identical to one that never left.
+  const ownEpoch = Date.now();
+  let seasonSource = null;
+  let yearT = 0;
+  let yearSampledAt = 0;
+  const openOf = new Float32Array(table.length);
+  const paintedOpen = new Float32Array(table.length).fill(-1);
+  const BLOOM_MIN = 1e-3;
+
+  function currentYearT() {
+    const wall = Date.now();
+    if (wall - yearSampledAt <= 400 && yearSampledAt) return yearT;
+    yearSampledAt = wall;
+    let phase = null;
+    if (typeof seasonSource === 'function') phase = seasonSource();
+    else if (net && net.world && typeof net.world.seasonPhase === 'function') phase = net.world.seasonPhase();
+    if (phase && Number.isFinite(phase.yearT)) yearT = phase.yearT;
+    else if (Number.isFinite(phase)) yearT = phase;
+    else yearT = seasonAt(wall, ownEpoch).yearT;
+    return yearT;
+  }
+
+  function refreshBloom(t) {
+    for (let s = 0; s < table.length; s++) openOf[s] = bloomOpenAt(table[s], t);
+  }
+  refreshBloom(currentYearT());
 
   const groups = [];
   for (let s = 0; s < table.length; s++) {
@@ -422,11 +527,15 @@ export function createFlowers(scene, terrain) {
     bucket.push(i);
   }
 
+  // Out of its window a bloom greys toward the spent colour, so "nothing here yet" is
+  // legible from the air without opening a panel.
   function writeColor(i) {
-    const g = groups[speciesOf[i]];
+    const s = speciesOf[i];
+    const g = groups[s];
     const o = local[i] * 3;
-    const d = depletion[i] * FLOWERS.spentFade;
-    const m = tint[i] * (1 - d * 0.34);
+    const closed = 1 - openOf[s];
+    const d = Math.min(1, depletion[i] * FLOWERS.spentFade + closed * 0.72);
+    const m = tint[i] * (1 - d * 0.34) * (1 - closed * 0.16);
     g.color[o] = (1 + (spent.r - 1) * d) * m;
     g.color[o + 1] = (1 + (spent.g - 1) * d) * m;
     g.color[o + 2] = (1 + (spent.b - 1) * d) * m;
@@ -455,10 +564,11 @@ export function createFlowers(scene, terrain) {
     }
 
     const d = depletion[i];
+    const closed = 1 - openOf[speciesOf[i]];
     const far = smoothstep(FLOWERS.lodNear, FLOWERS.lodFar, dist);
     const s = scale[i] * vis;
-    const sx = s * (1 - d * FLOWERS.curlAmount) * (1 + FLOWERS.farWidthBoost * far);
-    const sy = s * (1 - d * FLOWERS.curlDroop);
+    const sx = s * (1 - d * FLOWERS.curlAmount) * (1 + FLOWERS.farWidthBoost * far) * (1 - closed * 0.42);
+    const sy = s * (1 - d * FLOWERS.curlDroop) * (1 - closed * 0.34);
     const a = yaw[i];
     const c = Math.cos(a) * sx;
     const n = Math.sin(a) * sx;
@@ -487,6 +597,10 @@ export function createFlowers(scene, terrain) {
     reserve: 0,
     reserveMax: 1,
     ratio: 0,
+    inBloom: true,
+    bloom: 1,
+    zone: 0,
+    zoneName: '',
   };
 
   let cursor = 0;
@@ -607,6 +721,10 @@ export function createFlowers(scene, terrain) {
     handle.reserve = reserve[i];
     handle.reserveMax = reserveMax[i];
     handle.ratio = reserve[i] / reserveMax[i];
+    handle.bloom = openOf[s];
+    handle.inBloom = openOf[s] > BLOOM_MIN;
+    handle.zone = zoneOf[s];
+    handle.zoneName = ZONES.bands[zoneOf[s]].name;
     return handle;
   }
 
@@ -618,6 +736,10 @@ export function createFlowers(scene, terrain) {
     const span = Math.ceil(r / cell);
     let best = -1;
     let bestSq = r * r;
+    // A closed bloom is still worth pointing at — that is how the player learns the window
+    // exists — but an open one always wins, so gathering never latches onto a dud nearby.
+    let dud = -1;
+    let dudSq = r * r;
     for (let j = -span; j <= span; j++) {
       for (let k = -span; k <= span; k++) {
         const bucket = grid.get(`${cx + k},${cz + j}`);
@@ -629,15 +751,15 @@ export function createFlowers(scene, terrain) {
           const dy = headY(i) - position.y;
           const dz = fz[i] - position.z;
           const dSq = dx * dx + dy * dy + dz * dz;
-          if (dSq < bestSq) {
-            bestSq = dSq;
-            best = i;
-          }
+          if (openOf[speciesOf[i]] > BLOOM_MIN) {
+            if (dSq < bestSq) { bestSq = dSq; best = i; }
+          } else if (dSq < dudSq) { dudSq = dSq; dud = i; }
         }
       }
     }
-    if (best < 0) return null;
-    return fillHandle(best, Math.sqrt(bestSq));
+    if (best >= 0) return fillHandle(best, Math.sqrt(bestSq));
+    if (dud < 0) return null;
+    return fillHandle(dud, Math.sqrt(dudSq));
   }
 
   // Sends the accumulated want for one flower as a single transaction and credits the
@@ -681,6 +803,9 @@ export function createFlowers(scene, terrain) {
   function drain(target, amount, onTaken) {
     const i = typeof target === 'number' ? target : target && target.index;
     if (!(i >= 0) || !(amount > 0)) return null;
+    // Out of its window a flower yields nothing at all, and its reserve is not touched:
+    // the gate is on the harvest, not on the plant.
+    if (!(openOf[speciesOf[i]] > BLOOM_MIN)) return null;
 
     if (net) {
       if (typeof onTaken === 'function') pendingCb[i] = onTaken;
@@ -810,6 +935,19 @@ export function createFlowers(scene, terrain) {
     const px = last.x;
     const pz = last.z;
 
+    // Ten cheap derivations a few times a second. A species only repaints its instances
+    // when its openness has visibly moved, which is a couple of dozen times a whole year.
+    refreshBloom(currentYearT());
+    for (let s = 0; s < table.length; s++) {
+      if (Math.abs(openOf[s] - paintedOpen[s]) < 0.05) continue;
+      paintedOpen[s] = openOf[s];
+      for (let i = 0; i < total; i++) {
+        if (speciesOf[i] !== s) continue;
+        writeColor(i);
+      }
+      groups[s].mesh.instanceMatrix.needsUpdate = true;
+    }
+
     // Re-derive only the flowers that are not full. No accumulation: the value comes
     // from the drain stamp, so regrowth that happened while the tab was closed (or
     // while another queen was the only one playing) is already in it.
@@ -854,6 +992,19 @@ export function createFlowers(scene, terrain) {
     get netAttached() { return Boolean(net); },
     idOf: (i) => ids[i],
     headHeightOf: (s) => headOf[s],
+    // The calendar and the HUD read bloom from here rather than recomputing it, so what
+    // the panel promises and what the meadow yields can never disagree.
+    attachSeason(fn) { seasonSource = typeof fn === 'function' ? fn : null; yearSampledAt = 0; refreshBloom(currentYearT()); },
+    yearPhase: () => currentYearT(),
+    bloomOf: (s) => openOf[s],
+    inBloom: (s) => openOf[s] > BLOOM_MIN,
+    bloomById(id) {
+      for (let s = 0; s < table.length; s++) if (table[s].id === id) return openOf[s];
+      return 0;
+    },
+    countOf: (s) => counts[s],
+    zoneOfSpecies: (s) => zoneOf[s],
+    instanceCounts: () => Array.from(counts),
     reserveOf: (i) => reserve[i],
     trackedCount: () => trackedCount,
     dispose() {

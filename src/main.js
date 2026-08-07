@@ -16,6 +16,9 @@ import { seasonAt } from './net/offline.js';
 import { createComb } from './nest/comb.js';
 import { createBuildMode } from './nest/build-mode.js';
 import { createBuildPanel } from './ui/build-panel.js';
+import { createSwarm } from './entities/swarm.js';
+import { createHornets } from './entities/hornets.js';
+import { createZones } from './world/zones.js';
 
 const canvas = document.getElementById('app');
 const loadingEl = document.getElementById('loading');
@@ -296,6 +299,9 @@ async function boot() {
   let comb = null;
   let buildPanel = null;
   let build = null;
+  let swarm = null;
+  let hornets = null;
+  let zones = null;
   if (interior) {
     comb = createComb({ interior, resources, audio });
     buildPanel = createBuildPanel({ onSelect: (id) => build && build.selectType(id) });
@@ -307,6 +313,29 @@ async function boot() {
       audio,
       domElement: canvas,
       canOpen: () => mode === 'play' && Boolean(portal) && portal.state.insideness > 0.5,
+    });
+  }
+
+  zones = createZones(scene, { comb });
+  swarm = createSwarm({ scene, assets, flight, flowers, gather, comb, net: null });
+  if (comb) {
+    hornets = createHornets({ scene, terrain, comb, net: null, flight, entrance: hive && hive.entrance });
+    // A raid resolved by the owner is applied to the shared comb here — the hornet
+    // system decides, it never reaches into the nest itself.
+    hornets.onRaidResult((result) => {
+      if (!result || !comb) return;
+      for (const key of result.cellsDestroyed || []) {
+        if (typeof comb.destroy === 'function') comb.destroy(key);
+      }
+    });
+    hornets.onContact(() => {
+      // The queen is never hurt: she drops what she carries and is sent home.
+      if (gather && typeof gather.dropLoad === 'function') gather.dropLoad();
+      const spec = interior && interior.spec;
+      if (spec && flight && flight.simPosition) {
+        flight.simPosition.set(spec.centerX, spec.entranceY, spec.centerZ);
+        flight.velocity.set(0, 0, 0);
+      }
     });
   }
 
@@ -437,6 +466,8 @@ async function boot() {
       // Flower reserves become shared and server-timed as soon as the session exists.
       if (flowers && typeof flowers.attachNet === 'function') flowers.attachNet(net);
       if (comb) comb.attachNet(net);
+      if (swarm && typeof swarm.attachNet === 'function') swarm.attachNet(net);
+      if (hornets && typeof hornets.attachNet === 'function') hornets.attachNet(net);
       net.onPeerJoin((peer) => {
         if (!createQueen || remotes.has(peer.uid)) return;
         const visual = createQueen(scene, assets);
@@ -516,13 +547,22 @@ async function boot() {
     if (portal) portal.update(dt);
     if (gather && !(build && build.state.open)) gather.update(dt, input);
     if (comb) comb.update(dt);
+    if (swarm) {
+      swarm.update(dt, {
+        gathering: gather ? gather.state.charge : 0,
+        target: gather ? gather.state.target : null,
+        insideness: portal ? portal.state.insideness : 0,
+        honey: comb ? comb.stores.honey : 0,
+      });
+    }
+    if (hornets) hornets.update(dt, worldNow());
     if (net) {
       net.publishSelf({
         position: flight.position,
         quaternion: flight.quaternion,
         velocity: flight.velocity,
         carrying: gather ? gather.state.load : 0,
-        swarm: {},
+        swarm: swarm ? swarm.composition : {},
         cosmetic: session && session.profile
           ? { color: session.profile.color, pattern: session.profile.pattern }
           : null,
@@ -533,6 +573,7 @@ async function boot() {
   loop.onRender((alpha, dt, elapsed) => {
     timeOfDay = timeOfDayAt(worldNow());
     if (sky && typeof sky.update === 'function') sky.update(dt, timeOfDay, camera.position);
+    if (zones) zones.update(dt, flight);
     if (weather) {
       if (typeof weather.setIndoor === 'function') {
         weather.setIndoor(portal ? portal.state.insideness : 0);
@@ -635,6 +676,7 @@ async function boot() {
     get net() { return net; },
     get netInfo() { return netInfo; },
     get remotes() { return remotes; },
+    swarm, hornets, zones,
     nest: interior ? { interior, portal, grid: interior.grid, spec: interior.spec, comb, build } : null,
   };
 

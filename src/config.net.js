@@ -31,7 +31,16 @@ export const NET = {
     idleMoveEpsilon: 0.05, // metres of movement below which a frame counts as idle
     idleTurnEpsilon: 0.01, // quaternion component delta below which a frame counts as idle
     swarmHz: 1,            // swarm composition only ever goes out when it changes
-    presenceStaleSec: 12,  // presence entries older than this are treated as gone
+    // How long a presence entry may go unheard before the hive treats that queen as
+    // gone. This is a BACKSTOP, not the primary signal: a player who closes the tab is
+    // removed instantly by Firebase onDisconnect, so the only thing this window catches
+    // is a crash or a dead socket. It therefore wants to be generous rather than tight.
+    // At 12 s a player who alt-tabbed vanished from their friend's hive, because a
+    // hidden tab has its setInterval throttled by the browser (to ~1/min after a few
+    // minutes) and cannot keep a 3 s heartbeat. 45 s survives that throttling long
+    // enough for the common case of tabbing away to look something up, while a genuinely
+    // crashed client still clears well inside a minute.
+    presenceStaleSec: 45,
     worldClockSyncSec: 30, // the owner refreshes bank.lastActive at this interval
 
     // The heartbeat runs on setInterval, NOT on the frame loop: src/core/loop.js stops

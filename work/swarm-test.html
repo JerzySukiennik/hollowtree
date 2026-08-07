@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hollowtree — swarm self test</title>
+<style>
+  html, body { background: #14100c; color: #f6e9cf; margin: 0; }
+  body { padding: 22px 26px; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h1 { font-size: 13px; letter-spacing: .18em; text-transform: uppercase; opacity: .6; margin: 0 0 14px; font-weight: 500; }
+  pre { white-space: pre-wrap; margin: 0; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<h1>Hollowtree · swarm · boids, collective gathering, cap, upkeep, payload</h1>
+<pre id="report">running…</pre>
+<script type="module">
+import * as THREE from 'three';
+import { SWARM, WORKER_TYPES } from '../src/config.swarm.js';
+import { createSwarm } from '../src/entities/swarm.js';
+import { createHexGrid } from '../src/nest/hexgrid.js';
+import { createComb } from '../src/nest/comb.js';
+import { createResources } from '../src/systems/resources.js';
+import { sanitizeSwarm } from '../src/net/util.js';
+
+const out = document.getElementById('report');
+const lines = [];
+let passed = 0, failed = 0;
+function log(t) { lines.push(t); out.textContent = lines.join('\n'); }
+const section = (t) => { log(''); log(`— ${t}`); };
+const nowMs = () => performance.now();
+function pass(n, d) { passed++; log(`PASS  ${n}${d ? `  ${d}` : ''}`); }
+function fail(n, d) { failed++; log(`FAIL  ${n}${d ? `  ${d}` : ''}`); }
+function check(ok, n, d) { if (ok) pass(n, d); else fail(n, d); }
+const f2 = (x) => (Number.isFinite(x) ? x.toFixed(2) : String(x));
+const f3 = (x) => (Number.isFinite(x) ? x.toFixed(3) : String(x));
+
+window.addEventListener('error', (e) => { failed++; log(`FAIL  uncaught — ${e.message}`); });
+window.addEventListener('unhandledrejection', (e) => {
+  failed++; const r = e.reason; log(`FAIL  unhandled rejection — ${r && r.stack ? r.stack : r}`);
+});
+
+// ---------------------------------------------------------------- 0 · environment probe
+// Nothing below compares a measured time against a fixed constant. A hidden/throttled
+// preview pane is slower by a factor we MEASURE here, and every deadline and budget is
+// multiplied by it. Three false failure reports in this project came from skipping this.
+function calibrate() {
+  let s = 0;
+  const t = nowMs();
+  for (let i = 1; i < 3e6; i++) s += Math.sqrt(i);
+  const ms = nowMs() - t;
+  return { ms, sink: s };
+}
+calibrate();                                   // warm the JIT, discard
+const cal = calibrate();
+const REF_MS = 5.0;                            // 3e6 sqrt on an unthrottled 2019 i9
+const SLOW = Math.max(1, cal.ms / REF_MS);     // machine + throttle factor
+const CASE_MS = Math.round(20000 * Math.min(20, SLOW));
+
+let timerFactor = 1;
+{
+  const t = nowMs();
+  const N = 8;
+  for (let i = 0; i < N; i++) await new Promise((r) => setTimeout(r, 0));
+  timerFactor = Math.max(1, ((nowMs() - t) / N) / 1.0);
+}
+
+log(`ENV   calibration loop ${f2(cal.ms)} ms (ref ${f2(REF_MS)}) → CPU factor ${f2(SLOW)}×`);
+log(`ENV   setTimeout(0) latency ${f2(timerFactor)} ms → timer throttle ${f2(timerFactor)}×`);
+log(`ENV   every budget below is scaled by ${f2(SLOW)}×; case deadline ${CASE_MS} ms`);
+
+function withDeadline(name, fn, ms) {
+  let timer = null;
+  const limit = ms || CASE_MS;
+  return Promise.race([
+    Promise.resolve().then(fn),
+    new Promise((resolve) => {
+      timer = setTimeout(() => { fail(`${name} — deadline`, `${limit} ms elapsed with no result`); resolve(); }, limit);
+    }),
+  ]).catch((error) => {
+    fail(`${name} — threw`, error && error.stack ? error.stack.split('\n')[0] : String(error));
+  }).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+// ---------------------------------------------------------------- fixtures
+
+// A field of blooms on a regular lattice with a shared, reused handle — the same trap
+// the real flowers module sets (sampleNearest returns ONE mutable object).
+function makeField({ spacing = 1.6, half = 40, reserve = 400 } = {}) {
+  const fx = [], fy = [], fz = [], res = [];
+  for (let x = -half; x <= half; x++) {
+    for (let z = -half; z <= half; z++) {
+      fx.push(x * spacing); fy.push(0.55); fz.push(z * spacing); res.push(reserve);
+    }
+  }
+  const n = fx.length;
+  const handle = { index: -1, position: new THREE.Vector3(), distance: 0, ratio: 1, species: { name: 'test' } };
+  const cell = spacing;
+  const bins = new Map();
+  const key = (a, b) => `${a},${b}`;
+  for (let i = 0; i < n; i++) {
+    const k = key(Math.floor(fx[i] / cell), Math.floor(fz[i] / cell));
+    let list = bins.get(k); if (!list) { list = []; bins.set(k, list); }
+    list.push(i);
+  }
+  let drains = 0, taken = 0;
+  const worked = new Set();
+  return {
+    count: n,
+    get drains() { return drains; },
+    get taken() { return taken; },
+    get distinct() { return worked.size; },
+    resetStats() { drains = 0; taken = 0; worked.clear(); },
+    sampleNearest(p, radius) {
+      const r = radius || 1;
+      const span = Math.ceil(r / cell);
+      const cx = Math.floor(p.x / cell), cz = Math.floor(p.z / cell);
+      let best = -1, bestSq = r * r;
+      for (let a = -span; a <= span; a++) for (let b = -span; b <= span; b++) {
+        const list = bins.get(key(cx + a, cz + b)); if (!list) continue;
+        for (const i of list) {
+          if (res[i] <= 0) continue;
+          const dx = fx[i] - p.x, dy = fy[i] - p.y, dz = fz[i] - p.z;
+          const d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 < bestSq) { bestSq = d2; best = i; }
+        }
+      }
+      if (best < 0) return null;
+      handle.index = best;
+      handle.position.set(fx[best], fy[best], fz[best]);
+      handle.distance = Math.sqrt(bestSq);
+      handle.ratio = res[best] / 400;
+      return handle;
+    },
+    drain(target, amount, cb) {
+      const i = typeof target === 'number' ? target : target && target.index;
+      if (!(i >= 0) || !(amount > 0)) return null;
+      const got = Math.min(res[i], amount);
+      if (!(got > 0)) return null;
+      res[i] -= got;
+      drains++; taken += got; worked.add(i);
+      const scoop = { taken: got, pollen: got, nectar: 0, resin: 0, index: i };
+      if (cb) cb(scoop);
+      return scoop;
+    },
+  };
+}
+
+// A gather sink with unlimited baskets — this suite measures the swarm's throughput,
+// not the queen's basket size.
+function makeGatherSink() {
+  const sink = { state: { full: false, active: true, target: null }, units: 0 };
+  sink.creditSwarm = (scoop) => { sink.units += scoop.taken || 0; };
+  return sink;
+}
+
+function makeFlight(x = 0, y = 3, z = 0) {
+  return { position: new THREE.Vector3(x, y, z), velocity: new THREE.Vector3(0, 0, 0), quaternion: new THREE.Quaternion() };
+}
+
+// A comb stand-in: the swarm reads swarmCap, forageThroughput, stores.honey, cells.
+function makeCombStub({ swarmCap = 400, honey = 1e6, wax = true } = {}) {
+  const cells = new Map();
+  if (wax) cells.set('wax0', { type: 'wax', done: true, active: true });
+  return {
+    cells,
+    stores: { honey },
+    effects: { swarmCap, forageThroughput: 1, counts: wax ? { wax: 1 } : {} },
+    staffed: null,
+    setStaffing(patch) { this.staffed = { ...(this.staffed || {}), ...patch }; },
+  };
+}
+
+function makeBank(rich = true) {
+  const held = { pollen: rich ? 1e7 : 0, nectar: rich ? 1e7 : 0, resin: rich ? 1e7 : 0 };
+  let calls = 0;
+  return {
+    held, get calls() { return calls; },
+    bank: {
+      spend(cost) {
+        calls++;
+        for (const k of Object.keys(cost)) if ((held[k] || 0) < (cost[k] || 0)) return Promise.resolve(false);
+        for (const k of Object.keys(cost)) held[k] -= cost[k] || 0;
+        return Promise.resolve(true);
+      },
+    },
+  };
+}
+
+// Fixed-step simulation, no wall clock, no rAF.
+function run(swarm, seconds, ctx, step) {
+  const dt = step || 1 / 60;
+  let t = 0;
+  while (t < seconds - 1e-9) { swarm.update(dt, ctx); t += dt; }
+  return t;
+}
+
+const scene = new THREE.Scene();
+
+async function fill(swarm, typeId, n) {
+  let made = 0;
+  while (made < n) {
+    const batch = Math.min(25, n - made);
+    if (!(await swarm.buy(typeId, batch))) break;
+    made += batch;
+  }
+  return made;
+}
+
+// ---------------------------------------------------------------- 1 · construction
+
+let base = null;
+await withDeadline('construction', async () => {
+  section('construction');
+  const flight = makeFlight();
+  const swarm = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub(), net: makeBank() });
+  check(swarm.meshes.length === WORKER_TYPES.length, 'one InstancedMesh per worker type',
+    `${swarm.meshes.length} meshes for ${WORKER_TYPES.length} types`);
+  check(swarm.meshes.every((m) => m.isInstancedMesh), 'every bee mesh is an InstancedMesh (never a Mesh per bee)',
+    swarm.meshes.map((m) => m.name).join(', '));
+  check(swarm.meshes.every((m) => m.castShadow === false), 'swarm bees cast no shadows', 'castShadow=false on all pools');
+  const bought = await swarm.buy('forager', 12);
+  check(bought && swarm.count === 12, 'buy(forager, 12) spawns 12 and reports them', `count=${swarm.count}`);
+  check(scene.children.filter((c) => c.isMesh && !c.isInstancedMesh).length === 0,
+    'no per-bee Mesh added to the scene', `${scene.children.length} scene children total`);
+  swarm.dispose();
+  base = true;
+});
+
+// ---------------------------------------------------------------- 2 · 200 bees, boid cost
+
+let ms200 = null;
+await withDeadline('200 bees', async () => {
+  section('200 bees · boid update cost');
+  const flight = makeFlight();
+  const swarm = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub(), net: makeBank() });
+  const made = await fill(swarm, 'forager', 200);
+  check(made === 200, '200 bees spawned into the pool', `made=${made}, count=${swarm.count}`);
+
+  run(swarm, 1.0, { gathering: false, insideness: 0 });   // settle the cloud
+  const N = 240;
+  let boid = 0, total = 0;
+  for (let i = 0; i < N; i++) {
+    swarm.update(1 / 60, { gathering: false, insideness: 0 });
+    boid += swarm.stats.boidMs;
+    total += swarm.stats.msPerFrame;
+  }
+  ms200 = boid / N;
+  const totalMs = total / N;
+  // 40 fps = 25 ms/frame for the WHOLE game; the swarm's slice is budgeted at 3 ms,
+  // scaled by the measured environment factor.
+  const budget = 3.0 * SLOW;
+  check(ms200 < budget, '200-bee boid update fits its slice of the 40 fps budget',
+    `${f3(ms200)} ms/frame boids, ${f3(totalMs)} ms/frame whole system (budget ${f2(budget)} ms = 3 ms × ${f2(SLOW)})`);
+
+  const counts = swarm.meshes.map((m) => m.count);
+  check(counts.reduce((a, b) => a + b, 0) === 200, 'all 200 bees are instances, spread over the type pools', `counts ${counts.join('/')}`);
+  swarm.dispose();
+});
+
+// ---------------------------------------------------------------- 3 · draw calls
+
+await withDeadline('draw calls', async () => {
+  section('draw calls');
+  let renderer = null;
+  try { renderer = new THREE.WebGLRenderer({ antialias: false }); } catch (e) { renderer = null; }
+  if (!renderer) { log('NOTE  no WebGL context — draw calls not measured'); return; }
+  const s = new THREE.Scene();
+  s.add(new THREE.AmbientLight(0xffffff, 1));
+  const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 400);
+  cam.position.set(0, 6, 22); cam.lookAt(0, 3, 0);
+  const flight = makeFlight();
+  const swarm = createSwarm({ scene: s, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub(), net: makeBank() });
+  await fill(swarm, 'forager', 120);
+  await fill(swarm, 'fanner', 80);
+  run(swarm, 0.5, { gathering: false, insideness: 0 });
+  renderer.render(s, cam);
+  const calls = renderer.info.render.calls;
+  const active = swarm.meshes.filter((m) => m.count > 0).length;
+  check(calls === active, 'one draw call per worker type, regardless of bee count',
+    `${calls} draw calls for ${active} populated types, ${swarm.total} bees, ${renderer.info.render.triangles} triangles`);
+  swarm.dispose();
+  renderer.dispose();
+});
+
+// ---------------------------------------------------------------- 4 · not O(n²)
+
+await withDeadline('neighbour search scaling', async () => {
+  section('neighbour search · cost curve');
+  const sizes = [25, 50, 100, 200];
+  const rows = [];
+  for (const n of sizes) {
+    const flight = makeFlight();
+    const swarm = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub(), net: makeBank() });
+    await fill(swarm, 'forager', n);
+    run(swarm, 0.8, { gathering: false, insideness: 0 });
+    const N = 200;
+    let ms = 0, tests = 0;
+    for (let i = 0; i < N; i++) {
+      swarm.update(1 / 60, { gathering: false, insideness: 0 });
+      ms += swarm.stats.boidMs; tests += swarm.stats.neighbourTests;
+    }
+    rows.push({ n, ms: ms / N, tests: tests / N });
+    swarm.dispose();
+  }
+  for (const r of rows) log(`      n=${String(r.n).padStart(3)}  ${f3(r.ms)} ms  ${(r.tests / r.n).toFixed(1)} neighbour tests/bee  (${Math.round(r.tests)} total)`);
+
+  const first = rows[0], last = rows[rows.length - 1];
+  const sizeGrowth = last.n / first.n;                       // 8×
+  const timeGrowth = last.ms / Math.max(1e-6, first.ms);
+  const testGrowth = last.tests / Math.max(1e-6, first.tests);
+  // O(n²) would be 64× for an 8× population. Anything at or under ~2× linear is a
+  // bounded-neighbourhood search. Ratios, never absolute times — no clock constant here.
+  check(timeGrowth < sizeGrowth * 2.2, 'boid cost grows ~linearly, not quadratically',
+    `${sizeGrowth}× bees → ${f2(timeGrowth)}× time (O(n²) would be ${sizeGrowth * sizeGrowth}×)`);
+  check(testGrowth < sizeGrowth * 1.6, 'neighbour tests grow ~linearly',
+    `${sizeGrowth}× bees → ${f2(testGrowth)}× tests, per-bee tests ${(first.tests / first.n).toFixed(1)} → ${(last.tests / last.n).toFixed(1)}`);
+  check((last.tests / last.n) < SWARM.maxNeighbours * 12, 'per-bee neighbourhood stays bounded at 200 bees',
+    `${(last.tests / last.n).toFixed(1)} tests/bee (maxNeighbours=${SWARM.maxNeighbours})`);
+});
+
+// ---------------------------------------------------------------- 5 · collective gathering
+
+await withDeadline('collective gathering', async () => {
+  section('collective gathering · a bigger swarm is faster AND wider');
+  const rows = [];
+  for (const n of [0, 10, 40]) {
+    const field = makeField();
+    const sink = makeGatherSink();
+    const flight = makeFlight();
+    const swarm = createSwarm({ scene, flight, flowers: field, gather: sink, comb: makeCombStub(), net: makeBank() });
+    if (n > 0) await fill(swarm, 'forager', n);
+    // the queen holds a bloom at the origin — the same bloom, the same field, every run
+    const target = field.sampleNearest(new THREE.Vector3(0, 0.55, 0), 4);
+    const held = { index: target.index, position: target.position.clone() };
+    const ctx = { gathering: true, target: held, insideness: 0, honey: 1e6 };
+    run(swarm, 6, ctx);                    // fly out and settle
+    field.resetStats();
+    sink.units = 0;
+    const secs = 6;
+    run(swarm, secs, ctx);
+    rows.push({
+      n,
+      rate: sink.units / secs,
+      distinct: field.distinct,
+      radius: swarm.stats.settleRadius,
+      settled: swarm.stats.settledBees,
+    });
+    swarm.dispose();
+  }
+  for (const r of rows) {
+    log(`      swarm ${String(r.n).padStart(3)}  ${f2(r.rate).padStart(7)} units/s  ${String(r.distinct).padStart(3)} blooms worked  reach ${f2(r.radius)} m  ${r.settled} settled`);
+  }
+  const [z, ten, forty] = rows;
+  check(z.rate === 0 && z.distinct === 0, 'an empty swarm gathers nothing on its own', `${f2(z.rate)} units/s`);
+  check(ten.rate > z.rate, '10 bees gather measurably faster than none', `${f2(z.rate)} → ${f2(ten.rate)} units/s`);
+  check(forty.rate > ten.rate * 1.8, '40 bees gather substantially faster than 10',
+    `${f2(ten.rate)} → ${f2(forty.rate)} units/s (${f2(forty.rate / Math.max(1e-6, ten.rate))}×)`);
+  check(forty.distinct > ten.distinct, 'a bigger swarm works more blooms', `${ten.distinct} → ${forty.distinct} blooms`);
+  check(forty.radius > ten.radius, 'a bigger swarm reaches further', `${f2(ten.radius)} m → ${f2(forty.radius)} m`);
+});
+
+// ---------------------------------------------------------------- 6 · cap from brood cells
+
+await withDeadline('cap tracks brood cells', async () => {
+  section('cap · brood cells, nothing arbitrary');
+  const VOLUME = {
+    minX: -48, maxX: 48, minZ: -32, maxZ: 32, floorY: 0, ceilY: 40,
+    entranceWall: 0, entranceS: 48, entranceY: 16, entranceRadius: 3.2,
+  };
+  const grid = createHexGrid({ ...VOLUME });
+  const resources = createResources();
+  for (const k of ['pollen', 'nectar', 'resin']) { resources.setCapacity(k, 1e7); resources.add(k, 1e6); }
+  const comb = createComb({ grid, resources, entrance: { s: VOLUME.entranceS, y: VOLUME.entranceY, radius: VOLUME.entranceRadius }, scene: null });
+  const flight = makeFlight();
+  const swarm = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb, net: makeBank() });
+
+  const bare = swarm.limit;
+  check(bare === SWARM.floorLimit, 'a comb with no brood holds only the floor', `limit=${bare} (floorLimit ${SWARM.floorLimit})`);
+
+  const tooMany = await swarm.buy('forager', bare + 3);
+  check(tooMany === false && swarm.count === 0, 'buying past the cap fails and spawns nothing', `count=${swarm.count}, limit=${swarm.limit}`);
+
+  // grow a brood cell next to the mouth and let it finish
+  const mouth = Array.from(comb.mouth)[0];
+  const parts = String(mouth).split(',').map(Number);
+  let placed = null;
+  for (const nb of grid.neighbors(parts[0], parts[1], parts[2])) {
+    const r = await comb.place(nb.col, nb.row, nb.layer, 'brood', 'me');
+    if (r && r.ok) { placed = nb; break; }
+  }
+  if (!placed) { const r = await comb.place(parts[0], parts[1], parts[2], 'brood', 'me'); if (r && r.ok) placed = { col: parts[0], row: parts[1], layer: parts[2] }; }
+  check(Boolean(placed), 'a brood cell was placed', placed ? `at ${placed.col},${placed.row},${placed.layer}` : 'no legal spot');
+  for (let i = 0; i < 4000 && comb.effects.swarmCap === 0; i++) comb.update(1 / 30);
+  const withBrood = swarm.limit;
+  check(withBrood > bare, 'placing a brood cell raises the cap', `${bare} → ${withBrood} (comb.swarmCap=${comb.effects.swarmCap})`);
+
+  const ok = await swarm.buy('forager', withBrood);
+  check(ok && swarm.count === withBrood, 'the swarm can now fill the new cap', `count=${swarm.count}/${withBrood}`);
+
+  const gone = await comb.demolish(placed.col, placed.row, placed.layer, 'me');
+  check(gone && gone.ok, 'brood cell demolished', gone ? `refund ${JSON.stringify(gone.refund)}` : 'failed');
+  const after = swarm.limit;
+  check(after < withBrood, 'demolishing lowers the cap', `${withBrood} → ${after}`);
+  run(swarm, 1.0, { gathering: false, insideness: 0, honey: 1e6 });
+  check(swarm.count <= after, 'the standing swarm shrinks to the new cap instead of hanging over it', `count=${swarm.count} ≤ limit=${after}`);
+  swarm.dispose();
+  comb.dispose();
+});
+
+// ---------------------------------------------------------------- 7 · unlocks
+
+await withDeadline('unlocks', async () => {
+  section('unlocks · only forager on a bare hive');
+  const flight = makeFlight();
+  const bare = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub({ wax: false }), net: makeBank() });
+  const rows = [];
+  for (const t of WORKER_TYPES) rows.push(`${t.id}=${bare.unlocked(t.id) ? 'yes' : 'no'}`);
+  const starters = WORKER_TYPES.filter((t) => bare.unlocked(t.id)).map((t) => t.id);
+  check(starters.length === 1 && starters[0] === 'forager', 'only forager is buildable without the cell its type names',
+    rows.join(' '));
+  const denied = await bare.buy('builder', 1);
+  check(denied === false && bare.count === 0, 'buying a locked type fails', `count=${bare.count}`);
+  bare.dispose();
+
+  const waxed = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub({ wax: true }), net: makeBank() });
+  const allowed = await waxed.buy('builder', 2);
+  check(allowed && waxed.count === 2, 'with a wax workshop standing, the wax-gated types unlock',
+    `${WORKER_TYPES.filter((t) => waxed.unlocked(t.id)).map((t) => t.id).join(', ')}`);
+  waxed.dispose();
+});
+
+// ---------------------------------------------------------------- 8 · bank
+
+await withDeadline('bank', async () => {
+  section('bank · the shared purse pays for bees');
+  const flight = makeFlight();
+  const rich = makeBank(true);
+  const swarm = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub(), net: rich });
+  const before = rich.held.pollen;
+  await swarm.buy('forager', 10);
+  check(rich.held.pollen === before - 100, 'buy() charges the shared bank at the type cost',
+    `pollen ${before} → ${rich.held.pollen} for 10 × ${WORKER_TYPES[0].cost.pollen}`);
+  swarm.dispose();
+
+  const broke = makeBank(false);
+  const poor = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub(), net: broke });
+  const ok = await poor.buy('forager', 1);
+  check(ok === false && poor.count === 0, 'an empty purse buys no bees', `count=${poor.count}`);
+  poor.dispose();
+});
+
+// ---------------------------------------------------------------- 9 · upkeep and starvation
+
+await withDeadline('upkeep', async () => {
+  section('upkeep · a swarm without honey shrinks in starveOrder');
+  const flight = makeFlight();
+  const combStub = makeCombStub({ honey: 0 });
+  const swarm = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: combStub, net: makeBank() });
+  await swarm.buy('forager', 6);
+  await swarm.buy('fanner', 4);
+  await swarm.buy('builder', 3);
+  await swarm.buy('guard', 2);
+  const start = { ...swarm.composition };
+  const startTotal = swarm.count;
+
+  // fed: honey present, nothing dies
+  combStub.stores.honey = 1e6;
+  run(swarm, 20, { gathering: false, insideness: 0 });
+  check(swarm.count === startTotal, 'a fed swarm never shrinks', `count=${swarm.count}, honey burn ${f3(swarm.upkeep.honeyPerSec)}/s`);
+  const fedBurn = swarm.upkeep.honeyPerSec;
+
+  // sheltering costs less
+  run(swarm, 0.2, { gathering: false, insideness: 1 });
+  check(swarm.upkeep.honeyPerSec < fedBurn, 'a swarm sheltering in the hollow eats less',
+    `${f3(fedBurn)} → ${f3(swarm.upkeep.honeyPerSec)} honey/s (relief ${SWARM.upkeepIndoorRelief})`);
+
+  // famine
+  combStub.stores.honey = 0;
+  const curve = [];
+  const order = [];
+  let lastComp = { ...swarm.composition };
+  let last = swarm.count;
+  for (let t = 0; t < 120; t += 0.5) {
+    run(swarm, 0.5, { gathering: false, insideness: 0 });
+    if (swarm.count !== last) {
+      for (const type of WORKER_TYPES) {
+        const now = swarm.composition[type.id] || 0;
+        const was = lastComp[type.id] || 0;
+        for (let k = 0; k < was - now; k++) order.push(type.id);
+      }
+      curve.push(`${t.toFixed(1)}s:${swarm.count}`);
+      last = swarm.count;
+      lastComp = { ...swarm.composition };
+    }
+    if (swarm.count === 0) break;
+  }
+
+  log(`      shrink curve: ${curve.join(' → ')}`);
+  log(`      death order:  ${order.join(' → ') || '(none)'}  (starveOrder ${WORKER_TYPES.map((t) => `${t.id}:${t.starveOrder}`).join(' ')})`);
+  check(swarm.count < startTotal, 'a starving swarm shrinks rather than crashing', `${startTotal} → ${swarm.count}`);
+  check(swarm.upkeep.starving === true || swarm.count === 0, 'upkeep reports the famine', `starving=${swarm.upkeep.starving}`);
+  const firstOut = order[0];
+  const highest = WORKER_TYPES.slice().sort((a, b) => b.starveOrder - a.starveOrder)[0].id;
+  check(firstOut === highest, 'the highest starveOrder dies first — foragers are kept longest',
+    `first out ${firstOut}, expected ${highest}; foragers left ${swarm.composition.forager}`);
+  swarm.dispose();
+});
+
+// ---------------------------------------------------------------- 10 · network payload
+
+await withDeadline('payload', async () => {
+  section('network payload · composition only, constant size');
+  const flight = makeFlight();
+  const swarm = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub(), net: makeBank() });
+  const sizes = [];
+  for (const n of [0, 1, 50, 200]) {
+    if (n > swarm.count) await fill(swarm, 'forager', n - swarm.count);
+    const wire = JSON.stringify(sanitizeSwarm(swarm.composition));
+    sizes.push({ n: swarm.count, bytes: wire.length, wire });
+  }
+  for (const s of sizes) log(`      ${String(s.n).padStart(3)} bees → ${String(s.bytes).padStart(3)} bytes  ${s.wire}`);
+  const nonZero = sizes.filter((s) => s.n > 0);
+  // The requirement is that bandwidth does not grow WITH THE BEES — one entry per type,
+  // never one per bee. Byte-for-byte equality is the wrong test: "200" is two characters
+  // longer than "1", so a correct implementation still varies by a few bytes. Assert the
+  // shape instead: a bounded payload whose growth is decimal digits, not per-bee state.
+  const same = nonZero.every((s) => s.bytes <= 64 && s.bytes - nonZero[0].bytes <= 8);
+  check(same, 'payload stays per-type, not per-bee, from 1 → 200 bees',
+    `${nonZero.map((s) => `${s.n}:${s.bytes}B`).join(', ')}`);
+  check(sizes[sizes.length - 1].bytes < 96, 'the whole swarm fits in a few dozen bytes on the wire',
+    `${sizes[sizes.length - 1].bytes} bytes at 200 bees`);
+  swarm.dispose();
+});
+
+// ---------------------------------------------------------------- 11 · remote flocks
+
+await withDeadline('remote flocks', async () => {
+  section('remote flocks · simulated locally from composition alone');
+  const flight = makeFlight();
+  const swarm = createSwarm({ scene, flight, flowers: makeField(), gather: makeGatherSink(), comb: makeCombStub(), net: makeBank() });
+  await fill(swarm, 'forager', 60);
+  const peerA = new THREE.Vector3(40, 4, 0);
+  const peerB = new THREE.Vector3(-40, 4, 0);
+  swarm.spawnRemote('peerA', { forager: 70 }, peerA);
+  swarm.spawnRemote('peerB', { forager: 70, guard: 0 }, peerB);
+  check(swarm.total === 200 && swarm.count === 60, 'three queens × their flocks share one pool',
+    `total=${swarm.total}, local=${swarm.count}`);
+
+  const N = 120;
+  let ms = 0;
+  run(swarm, 1.0, { gathering: false, insideness: 0 });
+  for (let i = 0; i < N; i++) { swarm.update(1 / 60, { gathering: false, insideness: 0 }); ms += swarm.stats.msPerFrame; }
+  const per = ms / N;
+  const budget = 6.0 * SLOW;
+  check(per < budget, '3 queens × 200 bees total fits the frame budget',
+    `${f3(per)} ms/frame for ${swarm.total} bees (budget ${f2(budget)} ms = 6 ms × ${f2(SLOW)})`);
+
+  const calls = swarm.meshes.filter((m) => m.count > 0).length;
+  check(calls <= WORKER_TYPES.length, 'still one mesh per type across all queens', `${calls} populated pools`);
+
+  swarm.spawnRemote('peerA', { forager: 20 }, peerA);
+  check(swarm.total === 150, 'a remote flock reconciles down when its composition shrinks', `total=${swarm.total}`);
+  swarm.despawnRemote('peerB');
+  check(swarm.total === 80, 'despawnRemote removes exactly that queen\'s bees', `total=${swarm.total}, local=${swarm.count}`);
+  swarm.dispose();
+});
+
+// ---------------------------------------------------------------- 12 · allocation discipline
+
+await withDeadline('steady state', async () => {
+  section('steady state · no per-frame allocation, no drift');
+  const flight = makeFlight();
+  const field = makeField();
+  const swarm = createSwarm({ scene, flight, flowers: field, gather: makeGatherSink(), comb: makeCombStub(), net: makeBank() });
+  await fill(swarm, 'forager', 150);
+  const target = field.sampleNearest(new THREE.Vector3(0, 0.55, 0), 4);
+  const held = { index: target.index, position: target.position.clone() };
+  const ctx = { gathering: true, target: held, insideness: 0, honey: 1e6 };
+  run(swarm, 3, ctx);
+
+  let finite = true;
+  const before = performance.memory ? performance.memory.usedJSHeapSize : null;
+  for (let i = 0; i < 600; i++) swarm.update(1 / 60, ctx);
+  const after = performance.memory ? performance.memory.usedJSHeapSize : null;
+  for (const m of swarm.meshes) {
+    const arr = m.instanceMatrix.array;
+    for (let i = 0; i < m.count * 16; i++) if (!Number.isFinite(arr[i])) { finite = false; break; }
+  }
+  check(finite, 'every instance matrix stays finite after 600 gathering frames', `${swarm.total} bees`);
+  if (before !== null) {
+    const growth = (after - before) / 1024 / 1024;
+    log(`      heap ${(before / 1048576).toFixed(1)} → ${(after / 1048576).toFixed(1)} MB over 600 frames (${growth.toFixed(2)} MB; GC noise included)`);
+    check(growth < 12, 'no runaway per-frame allocation over 600 frames', `${growth.toFixed(2)} MB growth`);
+  } else {
+    log('NOTE  performance.memory unavailable — heap growth not measured');
+  }
+  swarm.dispose();
+});
+
+// ---------------------------------------------------------------- summary
+
+section('summary');
+log(`${passed} passed, ${failed} failed`);
+log(`environment: CPU factor ${f2(SLOW)}×, timer latency ${f2(timerFactor)} ms`);
+document.title = failed ? `FAIL (${failed})` : `PASS (${passed})`;
+</script>
+</body>
+</html>
