@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>lightlab</title>
+<style>
+html,body{margin:0;background:#0b0906;color:#e9dcc4;font:12px ui-monospace,Menlo,monospace}
+#sheet{display:block;width:100vw}
+#app{position:fixed;left:-4000px;top:0}
+#stats{position:fixed;left:0;bottom:0;width:100%;background:rgba(0,0,0,.82);padding:6px 10px;white-space:pre;font-size:11px;line-height:1.35;z-index:9}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
+</head><body>
+<canvas id="app"></canvas>
+<canvas id="sheet"></canvas>
+<div id="stats">boot</div>
+<script type="module">
+import * as THREE from 'three';
+import { CAMERA, RENDER, WORLD, PALETTE } from '../src/config.js';
+import { createTerrain } from '../src/world/terrain.js';
+import { createSky } from '../src/world/sky.js';
+import { loadAssets } from '../src/core/assets.js';
+import { createHive } from '../src/entities/hive.js';
+import { createInterior } from '../src/nest/interior.js';
+import { createPortal } from '../src/nest/portal.js';
+import { createComb } from '../src/nest/comb.js';
+import { createResources } from '../src/systems/resources.js';
+import { createPost } from '../src/render/post.js';
+
+const TW = 640, TH = 360, COLS = 4, ROWS = 2;
+const canvas = document.getElementById('app');
+const sheet = document.getElementById('sheet');
+sheet.width = TW * COLS; sheet.height = TH * ROWS;
+const sctx = sheet.getContext('2d');
+const statsEl = document.getElementById('stats');
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(TW, TH, false);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = RENDER.toneMappingExposure;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.localClippingEnabled = true;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(PALETTE.skyHorizon);
+scene.fog = new THREE.Fog(PALETTE.fog, WORLD.fogNear, WORLD.fogFar);
+const camera = new THREE.PerspectiveCamera(CAMERA.fov, TW / TH, CAMERA.near, CAMERA.far);
+
+const assets = await loadAssets(() => {});
+const terrain = createTerrain(scene);
+const sky = createSky(scene, renderer);
+const hive = createHive(scene, terrain, assets);
+const interior = createInterior(scene, hive, assets, terrain);
+interior.attachColliders(terrain);
+const flight = { simPosition: new THREE.Vector3(), position: new THREE.Vector3(), velocity: new THREE.Vector3() };
+const portal = createPortal(scene, interior, flight, []);
+const comb = createComb({ interior, resources: createResources(), audio: null });
+comb.seedHive();
+// Cells animate in over their build time; re-apply the seed with an old timestamp so the
+// lab always renders a finished comb instead of one scaled to nothing.
+{
+  const snap = comb.snapshot();
+  const old = Date.now() - 120000;
+  for (const k of Object.keys(snap)) snap[k].a = old;
+  comb.applyRemote(snap);
+  comb.update(1 / 60);
+}
+const post = createPost(renderer, scene, camera);
+if (post && post.setSize) post.setSize(TW, TH);
+
+// Insideness is driven off the viewpoint so the lab can stand anywhere in the hall.
+portal.setViewpoint(() => camera.position);
+sky.update(1 / 60, 0.58, new THREE.Vector3(0, 20, 0));
+
+const spec = interior.spec;
+const anchor = comb.seedAnchor();
+const A = anchor ? anchor.position : new THREE.Vector3(-0.5, 15.66, -89.28);
+
+const VIEWS = [
+  // Just inside the mouth of the room — the first frame in which the hall is visible to a
+  // queen coming down the throat. Keyed off the measured cavity, not the bounding box,
+  // because a camera parked on the bounding box is embedded in the entrance wall's rock.
+  { name: 'aperture', pos: [0, spec.entranceY, interior.spec.cavity.maxZ - 1.5], look: [A.x, A.y, A.z] },
+  { name: 'mid-hall', pos: [0, 18, -55], look: [A.x, A.y, A.z] },
+  { name: 'close', pos: [A.x, A.y + 1, A.z + 12], look: [A.x, A.y, A.z] },
+  { name: 'side +X', pos: [-20, 22, -57], look: [48, 20, -60] },
+  { name: 'side -X', pos: [20, 22, -57], look: [-48, 20, -60] },
+  { name: 'seam scan -X', pos: [0, 22, -57], look: [-48, 22, -57] },
+  { name: 'wall compare', pos: [0, 22, -57], look: [0, 22, -89] },
+];
+
+function settle(seconds) {
+  const dt = 1 / 60;
+  for (let i = 0; i < seconds * 60; i++) { portal.update(dt); comb.update(dt); }
+}
+
+function readRect(x0, y0, x1, y1) {
+  const gl = renderer.getContext();
+  const W = TW, H = TH;
+  const w = x1 - x0, h = y1 - y0;
+  const buf = new Uint8Array(w * h * 4);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.readPixels(x0, H - y1, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  let sr = 0, sg = 0, sb = 0, ls = 0, n = w * h, lmax = 0;
+  for (let i = 0; i < buf.length; i += 4) {
+    const l = 0.2126 * buf[i] + 0.7152 * buf[i + 1] + 0.0722 * buf[i + 2];
+    sr += buf[i]; sg += buf[i + 1]; sb += buf[i + 2]; ls += l;
+    if (l > lmax) lmax = l;
+  }
+  return { r: +(sr / n).toFixed(1), g: +(sg / n).toFixed(1), b: +(sb / n).toFixed(1), luma: +(ls / n).toFixed(1), lumaMax: +lmax.toFixed(1) };
+}
+
+function project(v) {
+  const p = new THREE.Vector3(v.x, v.y, v.z).project(camera);
+  return { x: Math.round((p.x * 0.5 + 0.5) * TW), y: Math.round((-p.y * 0.5 + 0.5) * TH) };
+}
+
+const lines = [];
+function shoot(view, col, row) {
+  camera.position.set(view.pos[0], view.pos[1], view.pos[2]);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(view.look[0], view.look[1], view.look[2]);
+  camera.updateMatrixWorld(true);
+  settle(2);
+  camera.position.set(view.pos[0], view.pos[1], view.pos[2]);
+  camera.lookAt(view.look[0], view.look[1], view.look[2]);
+  camera.updateMatrixWorld(true);
+  post.render(1 / 60);
+
+  let note = '';
+  if (view.name === 'aperture' || view.name === 'mid-hall' || view.name === 'close') {
+    const c = project(A);
+    const cellPx = Math.abs(project(new THREE.Vector3(A.x + 2, A.y, A.z)).x - c.x);
+    const r = Math.max(4, Math.round(cellPx * 1.3));
+    const combS = readRect(c.x - r, c.y - r, c.x + r, c.y + r);
+    const off = Math.max(3 * r, 20);
+    const wallL = readRect(c.x - off - r, c.y - r, c.x - off + r, c.y + r);
+    const wallR = readRect(c.x + off - r, c.y - r, c.x + off + r, c.y + r);
+    const wall = (wallL.luma + wallR.luma) / 2;
+    view.rects = [
+      [c.x - r, c.y - r, 2 * r, 2 * r, '#4cf'],
+      [c.x - off - r, c.y - r, 2 * r, 2 * r, '#f84'],
+      [c.x + off - r, c.y - r, 2 * r, 2 * r, '#f84'],
+    ];
+    note = `comb ${combS.luma}  wallL ${wallL.luma} wallR ${wallR.luma}  |delta| ${Math.abs(combS.luma - wall).toFixed(1)}  weber ${((combS.luma - wall) / wall * 100).toFixed(1)}%`;
+  } else if (view.name === 'seam scan -X') {
+    // A hard-edged translucent overlay shows up as a one-pixel step in an otherwise smooth
+    // wall. Scan a band across the middle at full resolution and report the worst step,
+    // plus how many columns jump by more than 4 luma — a wall has none, a slab edge has a run.
+    const gl = renderer.getContext();
+    const y0 = TH / 2 - 60, y1 = TH / 2 + 60;
+    const buf = new Uint8Array(TW * (y1 - y0) * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.readPixels(0, TH - y1, TW, y1 - y0, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    const rows = y1 - y0;
+    const colLuma = new Float64Array(TW);
+    for (let x = 0; x < TW; x++) {
+      let s = 0;
+      for (let y = 0; y < rows; y++) {
+        const i = (y * TW + x) * 4;
+        s += 0.2126 * buf[i] + 0.7152 * buf[i + 1] + 0.0722 * buf[i + 2];
+      }
+      colLuma[x] = s / rows;
+    }
+    let worst = 0, worstAt = 0, steps = 0;
+    for (let x = 1; x < TW; x++) {
+      const d = Math.abs(colLuma[x] - colLuma[x - 1]);
+      if (d > 4) steps++;
+      if (d > worst) { worst = d; worstAt = x; }
+    }
+    const clip = readRect(0, 0, TW, TH);
+    note = `worst column step ${worst.toFixed(2)} at x=${worstAt}  columns stepping >4: ${steps}  frame mean ${clip.luma} max ${clip.lumaMax}`;
+  } else if (view.name === 'wall compare') {
+    // Does the build wall read brighter than bare rock? Sampled straight down the middle
+    // of each wall from the centre of the hall.
+    const cav = interior.spec.cavity;
+    const mid = (cav.floorY + cav.ceilY) * 0.5;
+    const eye = new THREE.Vector3((cav.minX + cav.maxX) / 2, spec.entranceY, (cav.minZ + cav.maxZ) / 2);
+    const faces = [
+      ['build(-Z)', new THREE.Vector3(0, 0, -1)],
+      ['+X', new THREE.Vector3(1, 0, 0)],
+      ['-X', new THREE.Vector3(-1, 0, 0)],
+      ['entry(+Z)', new THREE.Vector3(0, 0, 1)],
+    ];
+    const parts = [];
+    for (const [label, dir] of faces) {
+      camera.position.copy(eye);
+      camera.lookAt(eye.x + dir.x * 10, spec.entranceY, eye.z + dir.z * 10);
+      camera.updateMatrixWorld(true);
+      post.render(1 / 60);
+      parts.push(`${label} ${readRect(TW / 2 - 90, TH / 2 - 50, TW / 2 + 90, TH / 2 + 50).luma}`);
+    }
+    void mid;
+    note = parts.join('   ');
+  } else {
+    const strip = [];
+    for (let x = 20; x < TW - 20; x += 20) strip.push(readRect(x, TH / 2 - 10, x + 10, TH / 2 + 10).luma);
+    let maxJump = 0, at = 0;
+    for (let i = 1; i < strip.length; i++) {
+      const d = Math.abs(strip[i] - strip[i - 1]);
+      if (d > maxJump) { maxJump = d; at = 20 + i * 20; }
+    }
+    note = `midline luma ${strip.map(v => v.toFixed(0)).join(' ')}  | biggest step ${maxJump.toFixed(1)} at x=${at}`;
+  }
+  lines.push(`${view.name.padEnd(14)} ${note}`);
+
+  sctx.drawImage(canvas, col * TW, row * TH);
+  if (view.rects) {
+    sctx.lineWidth = 1;
+    for (const [x, y, w, hh, colr] of view.rects) {
+      sctx.strokeStyle = colr;
+      sctx.strokeRect(col * TW + x + 0.5, row * TH + y + 0.5, w, hh);
+    }
+  }
+  sctx.fillStyle = 'rgba(0,0,0,.6)';
+  sctx.fillRect(col * TW, row * TH, TW, 16);
+  sctx.fillStyle = '#ffe';
+  sctx.font = '12px monospace';
+  sctx.fillText(view.name, col * TW + 6, row * TH + 12);
+}
+
+window.LAB = {
+  interior, comb, portal, spec, camera, scene, renderer, post, THREE,
+  run() {
+    lines.length = 0;
+    sctx.clearRect(0, 0, sheet.width, sheet.height);
+    VIEWS.forEach((v, i) => shoot(v, i % COLS, Math.floor(i / COLS)));
+    statsEl.textContent = lines.join('\n');
+    return lines.join('\n');
+  },
+  // How hard is the shaft's edge? Measure the wall with the shafts off, then with them on,
+  // and look at the DIFFERENCE: that is the shaft's own contribution, free of the rock's
+  // shading. A soft volume ramps; a flat quad's silhouette is a step.
+  edgeTest() {
+    const view = { name: 'edge', pos: [0, 22, -57], look: [-48, 22, -57] };
+    const grp = interior.group.children.find((c) => c.name === 'hollow_shafts');
+    function scan() {
+      camera.position.set(view.pos[0], view.pos[1], view.pos[2]);
+      camera.up.set(0, 1, 0);
+      camera.lookAt(view.look[0], view.look[1], view.look[2]);
+      camera.updateMatrixWorld(true);
+      post.render(1 / 60);
+      const gl = renderer.getContext();
+      const y0 = TH / 2 - 60, rows = 120;
+      const buf = new Uint8Array(TW * rows * 4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(0, TH - (y0 + rows), TW, rows, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+      const out = new Float64Array(TW);
+      for (let x = 0; x < TW; x++) {
+        let s = 0;
+        for (let y = 0; y < rows; y++) {
+          const i = (y * TW + x) * 4;
+          s += 0.2126 * buf[i] + 0.7152 * buf[i + 1] + 0.0722 * buf[i + 2];
+        }
+        out[x] = s / rows;
+      }
+      return out;
+    }
+    function report(label, on, off) {
+      let peak = 0, maxStep = 0, at = 0;
+      for (let x = 0; x < TW; x++) {
+        const d = on[x] - off[x];
+        if (Math.abs(d) > peak) peak = Math.abs(d);
+        if (x) {
+          const step = Math.abs((on[x] - off[x]) - (on[x - 1] - off[x - 1]));
+          if (step > maxStep) { maxStep = step; at = x; }
+        }
+      }
+      return `${label}: peak contribution ${peak.toFixed(1)} luma, hardest edge ${maxStep.toFixed(2)} luma/px at x=${at}`;
+    }
+    if (grp) grp.visible = false;
+    if (window.__legacy) window.__legacy.visible = false;
+    const off = scan();
+    if (grp) grp.visible = true;
+    const nw = scan();
+    if (grp) grp.visible = false;
+    this.legacyShafts(true);
+    const lg = scan();
+    this.legacyShafts(false);
+    if (grp) grp.visible = true;
+    return [report('legacy tube shafts', lg, off), report('new soft shafts', nw, off)].join('\n');
+  },
+
+  // toggle interior.group children by index, for isolating what draws a seam
+  toggle(i, on) { interior.group.children[i].visible = on; return interior.group.children.map((c, k) => k + ':' + (c.name || c.type) + '=' + c.visible).join(' '); },
+
+  // Rebuild the shafts exactly as they were before this change — closed 8-sided additive
+  // tubes plus a 4-sided entrance pyramid — so the "border" on the side walls can be
+  // reproduced on demand instead of taken on trust. LAB.legacyShafts(true) then LAB.run().
+  legacyShafts(on) {
+    const grp = interior.group.children.find((c) => c.name === 'hollow_shafts');
+    if (grp) grp.visible = !on;
+    if (!on) {
+      if (window.__legacy) window.__legacy.visible = false;
+      return 'new shafts';
+    }
+    if (window.__legacy) { window.__legacy.visible = true; return 'legacy shafts'; }
+    const sp = interior.spec;
+    const pos = [], col = [], idx = [];
+    const column = (cx, cz, thx, thz, bhx, bhz, yTop, yBot, color, gain) => {
+      const sides = 8;
+      const top = new THREE.Color(color).multiplyScalar(gain);
+      const bot = new THREE.Color(color).multiplyScalar(gain * 0.03);
+      const base = pos.length / 3;
+      for (let i = 0; i < sides; i++) { const a = i / sides * Math.PI * 2; pos.push(cx + Math.cos(a) * thx, yTop, cz + Math.sin(a) * thz); col.push(top.r, top.g, top.b); }
+      for (let i = 0; i < sides; i++) { const a = i / sides * Math.PI * 2; pos.push(cx + Math.cos(a) * bhx, yBot, cz + Math.sin(a) * bhz); col.push(bot.r, bot.g, bot.b); }
+      for (let i = 0; i < sides; i++) { const j = (i + 1) % sides; idx.push(base + i, base + j, base + sides + i, base + j, base + sides + j, base + sides + i); }
+    };
+    const W = 11.0 * 0.5, D = 8.5 * 0.5;
+    const yTop = sp.ceilY - 0.2, yBot = sp.floorY + sp.height * 0.04;
+    for (const s of sp.skylights) {
+      column(s.x, s.z, W * 0.72, D * 0.72, W * 1.5, D * 1.5, yTop, yBot, 0xbcd6ff, 1.0);
+      column(s.x, s.z, W * 1.25, D * 1.25, W * 2.9, D * 2.9, yTop, yBot, 0xbcd6ff, 0.34);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setIndex(idx);
+    const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.1,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false,
+    }));
+    mesh.frustumCulled = false;
+    window.__legacy = mesh;
+    interior.group.add(mesh);
+    return 'legacy shafts';
+  },
+};
+window.LAB.run();
+window.__labReady = true;
+</script>
+</body></html>

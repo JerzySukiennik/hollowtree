@@ -814,3 +814,110 @@ establishing shot that previously carried the slab renders clean.
 are the harness hiding the pane, not the game): **median 16.3 ms / 61.3 fps, p95 18.5 ms / 54.1 fps** on the
 `balanced` tier. Two independent bursts agreed. Small sample — 10 live frames each — so read it as
 "vsync-locked, no obvious hitching", not as a benchmark.
+
+# ============================================================
+# Gauntlet run 3 — the hive must be legible without explanation
+# ============================================================
+
+- Run ID: 2026-08-08-hive-legibility
+- Status: ACTIVE
+- Mode: FULL MULTI-AGENT
+- Objective: A player who has never been told anything can fly in, see where to build, understand what
+  is needed and why, and place their first cell — and the opening sequence reads as authored, not broken.
+- Reference mode: PROXY (master prompt + Jurek's own design direction, quoted below)
+- Pass rule: >= 85/100 weighted, every critical dimension >= 4/5, all gates PASS
+- Approval boundaries: local edits only; no deploy without Jurek's word
+
+## Jurek's design direction (his words, treated as the spec)
+
+"Boczne ściany w środku dalej mają jakiś border i dalej nie mogę budować. Podejrzewam że jest gdzieś jakiś
+comb do którego muszę to podłączyć ale nigdzie go nie ma. Wszędzie mi pokazuje czerwono. Nie rozumiem
+intuicyjnie tych napisów na ekranie (powinny może po prostu pokazywać jakie kwiaty/rośliny są potrzebne
+albo powinny być po prostu łatwiejsze do zrozumienia). Może dodaj też tablicę z przepisami w ulu łatwą do
+zrozumienia. Mój pomysł: na przeciwko wejścia do ulu (od środka) była ściana w której się buduje te combs
+a pozostałe ściany były po prostu puste. Zróbmy tak że będzie jeden comb z napisem START od którego się
+wszystko buduje."
+
+## Already done this round (orchestrator, verified in-engine)
+
+- **One build wall.** `hexgrid.isValid` now also requires the cell to lie on `buildWall`, computed as
+  `(entranceWall + 2) % 4` — the wall you face flying in. Measured: of all lattice cells only wall 2
+  accepts any (1152 cells); walls 0, 1 and 3 return nothing at all.
+- **START comb, dead centre, at eye level.** `seedPlan` seeds from `grid.buildWallCenterS` at aperture
+  height instead of hugging the aperture rim, which had put it *behind* the arriving queen — the whole
+  "there is a comb somewhere but nowhere" complaint. Measured seed cells: 7, all at z -89.3, x -1.5..0.5,
+  y 14.8..16.5. A `START` sprite label sits above it and hides itself once the player builds anything.
+- **Route re-anchored.** `computeMouth` keyed off the aperture, which after the one-wall change matched
+  no buildable cell, silently making every `routeDist` Infinity and permanently disabling the route-gated
+  defensive cells. It now grows from the starting comb. Measured: all 7 seed cells at routeDist 0.
+- **Legal-spot markers + readable status** (previous round): 19 markers drawn at the start comb; the aim
+  status now reads "the entrance must stay clear" instead of the raw enum `blocked`.
+
+## The gap that remains, measured
+
+Aiming at the wall in front of the start comb now returns reason `cost` — the spot is legal and only the
+stores are empty, which is correct. But **the start comb is invisible in play**: `comb_seed` reports count
+7 and `visible: true`, yet renders as dark brown on dark brown. The hall's light is at the aperture, 64
+units away. A marker the player cannot see is not a marker.
+
+## Rubric v3
+
+| # | Dimension | Weight | Critical | Anchors |
+|---|---|---:|---|---|
+| 1 | Findability | 25 | yes | From the moment of arrival the player can see where to build without being told; the start comb is legible at the distance it is first seen |
+| 2 | Comprehensibility | 25 | yes | Every on-screen line names a concrete next action or a concrete resource; no raw enums, no jargon; a 14-year-old reads it once and knows what to do |
+| 3 | Interior craft | 20 | yes | The build wall reads as the build wall; other walls are bare and clean; no seams, borders or z-fighting |
+| 4 | Cinematic craft | 20 | yes | Reads as an authored shot sequence: no camera inside geometry, every shot has a framed subject, cuts intentional, clean handoff |
+| 5 | No regression | 10 | yes | Build, gather, zones, multiplayer sync and frame rate unchanged |
+
+## Gates
+
+- G1 Zero console errors from menu through cinematic into play.
+- G2 On a brand-new hive the start comb is visible from the aperture, measured, not asserted.
+- G3 Every string shown in play names an action or a resource — no enum leaks.
+- G4 A recipe reference is reachable in-hive and states cost, effect and unlock for every buildable cell.
+- G5 Frame rate median within 10% of 61 fps on `balanced`.
+- G6 `node work/net-node.test.mjs` still 49/49.
+
+## Round 3 — fresh Critic verdict and what it caught
+
+**Verdict: REJECT, 64/100.** All six gates passed; four of five critical dimensions scored 3/5,
+against a bar of 4. Findability 3, Comprehensibility 3, Interior craft 3, Cinematic craft 3,
+No regression 5.
+
+**The finding that mattered, and that three of my own verification passes missed.** The zone
+barrier is a cylinder centred on the hive at radius 46, but the hall runs back to z = -89.4,
+i.e. 59.4 m from that centre. The starting comb sits at z = -84.49 — **8.49 m outside the first
+ring**. The queen was hard-clamped at z = -76 and actively pushed away from the wall the game
+tells her to build on (Critic measured -76 -> -74.26 with `depth 0.89`, `blocked` true
+throughout). The "this ring is locked" line was therefore pinned to the screen the entire time
+the player stood at their own comb, inside their own hive.
+
+I missed this because every one of my build tests placed cells through `comb.place()` and moved
+the queen by assignment. Not once did I fly her into that wall under physics. The lesson is the
+same family as the earlier probe failures, one level up: **an API-level test of a spatial rule
+proves the rule, not the reachability.** If a player has to physically get somewhere, the test
+has to physically get there.
+
+Fix: `zones.update(dt, flight, insideness)` stands the barrier down entirely while inside the
+hollow — the rings gate the meadow and mean nothing indoors. Verified: queen parked at the comb
+sits at z = -78.49 (48.5 m out, past the old clamp) with `blocked: false` and `depth: 0` across
+22 samples.
+
+**Also fixed this round, all from the Critic's list:**
+- The panel printed `effects.capacity` under the label "room left in your stores" — it read
+  `pollen 40` while the HUD read `18 /40`. The label was simply false. Added `comb.bankSnapshot()`
+  and the panel now subtracts what is held.
+- `post.setQuality` does not exist; `main.js` called it behind a `typeof` guard so the quality
+  chips had never done anything. **My first fix for this broke the boot** — `setTier` takes an
+  index into `POST.tiers`, not the settings name, so passing `'balanced'` clamped to NaN and took
+  the whole game down. Mapped performance/balanced/high onto tiers 0/2/3.
+- The `START` sprite had `depthTest: false`, so it drew through every wall and, 45 m behind the
+  subject, straight over the hero queen in the opening. Now depth-tested and suppressed while
+  `mode === 'cinematic'`, checked per frame rather than per recompute.
+
+**Left open, with the Critic's evidence:** compressed cost notation in the build list (`6 2 2`);
+the hall shell painting over the meadow at `insideness ~0.84` while the trailing camera is still
+outside the bark; the seed comb subtending only 25 px from the aperture and the START label
+disappearing after the first cell; interior art reading cold and flat next to the cinematic's
+comb; `director.seek()` leaving `state.shot` empty for the first shot.
