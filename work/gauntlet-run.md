@@ -586,3 +586,231 @@ So: a Critic's number is evidence about its instrument as much as about the arte
 number you cannot reproduce is a control run, not an argument. Fourth time this session that the measurement, not the
 code, was the thing that needed fixing — after the stale fps counter, the settled-state authority sample, and the
 throttled-tab timeouts.
+
+# ============================================================
+# Gauntlet run 2 — five defects from real play
+# ============================================================
+
+- Run ID: 2026-08-08-playtest-fixes
+- Status: ACTIVE
+- Mode: FULL MULTI-AGENT
+- Objective: Every one of the five defects Jurek hit in play is fixed and demonstrated in the running game.
+- Artifact: `src/cinematic/*`, `src/ui/menu.js`, `src/nest/build-mode.js`, `src/nest/comb.js`, `src/config.comb.js`
+- Reference mode: PROXY (the master prompt's own statements) + DIRECT for item 2 (the supplied music file)
+- Pass rule: >= 85/100 weighted, every critical dimension >= 4/5, all gates PASS
+- Budget: default (max 8 rounds)
+- Approval boundaries: no deploy without Jurek's word; local edits only
+
+## The five defects, as reported
+
+1. Opening cinematic is broken by the 3D model — rebuild from scratch.
+2. Opening cinematic has no music; `assets/audio/cutscene-music.mp3` exists and is unused there.
+3. "Your Queen" colour/pattern does not actually apply, and Back does not work.
+4. Build mode should be bound to Tab.
+5. Cannot build: "must touch the comb" while no comb exists or is visible.
+
+## Baseline evidence (orchestrator, measured before any change)
+
+**Item 5 root cause found.** The touch rule itself is correct — on a fresh hive I placed a first cell
+(ok), an adjacent cell (ok) and a distant one (`detached`), so the rule behaves as designed. The defect is
+placement and discoverability:
+
+- A placed cell renders (`comb_honey` instanceCount 1, visible) but lands at world (47.5, 22.6, -89.3)
+  while the queen sits at (0, 16.5, -10.2) — roughly **80 units away**, on the far wall of a dark hall
+  spanning x -48..48, z -25..-89.
+- The first cell may be placed anywhere in a 320 x 44 x 4 lattice; every later cell must touch it; and
+  nothing in the game points to where the comb is.
+- So a player who places one cell out of sight is told "must touch the comb" everywhere else, with no way
+  to find it. That is exactly the reported symptom.
+
+**Design authority for the fix:** DESIGN-hollow.md, section 3, on the Landing: "This is the arrival room,
+the deposit point, and where the first comb is seeded." The hive should therefore start with a seed cell
+at the landing, visible on arrival — which removes the empty-comb trap entirely.
+
+## Rubric v2 (this run)
+
+| # | Dimension | Weight | Critical | Anchors |
+|---|---|---:|---|---|
+| 1 | Defect actually fixed | 35 | yes | Each of the five reported symptoms is gone, demonstrated by an in-engine measurement, not by reading the code |
+| 2 | Fixed for the reported reason | 20 | yes | The fix addresses the cause the evidence identifies; no symptom masking, no disabling of the failing path |
+| 3 | Cinematic craft | 20 | yes | Opening reads as an authored shot sequence: camera never clips geometry, never shows the inside of a mesh, subject stays framed, music starts with the shot and ducks out on skip |
+| 4 | Player-facing clarity | 15 | no | The player can tell what to press and where to build without being told out of band |
+| 5 | No regression | 10 | yes | Play mode, multiplayer sync, gather/deposit loop and frame rate all unchanged |
+
+## Gates (binary)
+
+- G1 Zero new console errors from menu -> cinematic -> play.
+- G2 On a brand-new hive, the player can place a comb cell within 10 seconds of entering play, without prior knowledge.
+- G3 Tab opens and closes build mode; Tab no longer moves browser focus.
+- G4 "Your Queen" colour/pattern is visibly applied to the queen in play, and Back returns to the previous screen.
+- G5 Cinematic plays `cutscene-music.mp3` and stops it cleanly on skip or end.
+- G6 Frame rate in play mode within 10% of the pre-change baseline.
+
+## Round 1 — topology
+
+Three Builders on disjoint file sets; `src/main.js` reserved to the Orchestrator so no two agents edit the wiring.
+
+- Builder A — cinematic rebuild + music: owns `src/cinematic/*`
+- Builder B — Your Queen + Tab: owns `src/ui/menu.js`, `src/nest/build-mode.js`, `src/entities/queen.js`
+- Builder C — comb seeding: owns `src/nest/comb.js`, `src/config.comb.js`
+
+## Defect 6 (added mid-run by Jurek) — "sometimes the motion blur turns into a swirl"
+
+**Cause, two parts, both in `src/render/post.js`:**
+
+1. **No reprojection reset on a camera cut.** `prevViewProj` was seeded once at construction and
+   then advanced every frame, with nothing resetting it when the camera moved discontinuously
+   (cinematic cut, portal transit, respawn). On such a frame the reprojected velocity is enormous.
+   `maxRadius` caps the radius but not the direction, so 8 taps along a huge rotational vector
+   smear the whole frame. That is why it happened "sometimes" rather than constantly.
+2. **Turning deliberately amplified it.** `turnGain: 0.55` raised blur strength with yaw rate — and
+   a pure camera rotation is exactly the case where the reprojection field circulates, i.e. the
+   vortex. The tuning maximised the artifact at the moment it was ugliest.
+
+**Fix:** added `detectCut(dt)`, which flags a frame as a cut when the camera's translation exceeds
+`cutSpeedRatio` x FLIGHT.maxSpeed or its rotation exceeds `cutTurnRate` rad/s. Both are *rates*, so a
+slow frame reads identically to a fast one and legitimate full-speed flight cannot trip them
+(the rule from the earlier false-failure lesson: never compare a time-derived value against a fixed
+per-frame delta). On a cut the motion pass is skipped, the history is re-seeded and `motionDrive` is
+zeroed so the blur does not ramp back in late. `turnGain` 0.55 -> 0.12 and `maxRadius` 0.026 -> 0.017
+keep translation blur while cutting the rotational component. Added `post.resetMotionHistory()` for
+deliberate cuts and `post.motionDebug()` so this is measurable. `camera.updateMatrixWorld()` moved
+ahead of the uniform update, which it always should have preceded. `post` exposed on
+`window.hollowtree` through a getter (it is reassigned to null if the stack throws).
+
+**Verification (in-engine, play mode, synchronous `post.render` calls so a hidden-tab rAF stall
+cannot distort the result):**
+
+| Case | Cuts | Note |
+|---|---|---|
+| Yaw 6.0 rad/s (~344 deg/s) x 40 frames | 0 | max strength 0.124, speed blur retained |
+| Translation 30 u/s x 40 frames | 0 | no false positive |
+| 250-unit jump in one frame | 1 | uStrength on that frame = 0 |
+| 180-degree snap in one frame | 1 | uStrength on that frame = 0 |
+| Next steady frame | - | `cutThisFrame` false, blur resumes |
+
+Console clean across menu -> cinematic -> play.
+
+**Cross-finding that matters for defect 1:** during the opening cinematic `cutCount` reached 2, and 4
+by the time play began. The opening therefore contains real camera discontinuities — those frames were
+producing the full-screen smear Jurek reported. Defect 6 and defect 1 overlap; the rebuilt cinematic
+should either avoid the cuts or call `post.resetMotionHistory()` at each deliberate one.
+
+## Round 1 verification — what was already fixed vs what this round changed
+
+Mtimes show `queen.js`, `build-mode.js`, `config.comb.js`, `comb.js`, `menu.js`, `opening.js`,
+`director.js` and `intro.js` were all rewritten between 00:25 and 00:35 on 2026-08-08, i.e. the five
+reported defects had already been implemented before this round started. Rather than rebuild them,
+this round verified each one in the running game. Every claim below is a measurement, not a reading
+of the source.
+
+| # | Defect | Status | Evidence |
+|---|---|---|---|
+| 1 | Opening broken by the model | FIXED (pre-existing) | Authored shot sequence, ~28.5 s: comb foreground with rack focus, swarm-to-entrance, wide establishing, title card "a hive is built, not won", clean handoff to play. No geometry intersection in any captured frame. Skip works (space) and lands in a clean play state. |
+| 2 | No music in the opening | FIXED (pre-existing) | `audio.music('cutscene')` wrapped and observed: called once, returned a live source on the first try. Buffer present in the library, 103.2 s, matching the file. Routed through the music bus, so master/music sliders apply. |
+| 3 | Your Queen colour/pattern dead, Back dead | FIXED (pre-existing) | Pattern banded -> crowned repainted live (`queen_gold` #cfc9b1 -> #ffe89a, `queen_crownrim` #6a84ba -> #ffcf5e). Colour -> `style.color: "ember"`, persisted to `hollowtree.settings`, swatch marked `is-on`. Livery is worn by the queen in the cinematic and in play. Back moves the panel from `is-on` to off. |
+| 4 | Build mode should be Tab | FIXED (pre-existing) + gap closed here | `BUILD_KEYS.toggle: 'Tab'`, `toggleAlt: 'KeyB'`, with a text-entry guard so the lobby code box still tabs. Verified: inside the hollow a Tab keydown opens build mode (`ht-build is-on`). |
+| 5 | Cannot build, "must touch the comb", no comb | FIXED (pre-existing) | Fresh hive seeds 7 cells; `comb_seed` InstancedMesh count 7, visible; `seeded()` true; `nearestCell()` 22.5 u from arrival; placement on a seed neighbour returns ok; 5 cell types unlocked and affordable. |
+| 6 | Motion blur swirl (raised this round) | FIXED this round | See the defect-6 section above. |
+
+**Two real gaps found and closed in this round, both discoverability rather than logic:**
+
+- **The build key was silent outside the hollow.** `canOpen` requires `portal.state.insideness > 0.5`,
+  which is correct — build mode belongs inside — but `onKeyDown` bailed with no feedback, so pressing
+  the build key on the meadow was indistinguishable from a broken binding. This is very likely part of
+  what "still cannot build" meant. Added `opts.onRefused`, wired in `main.js` to a transient HUD line,
+  "fly inside the hollow to build". Verified: the prompt is set on refusal and cleared 2.5 s later.
+- **The build panel's key legend still read "B close"** after the toggle moved to Tab. Corrected.
+
+**A correction to my own earlier reading, recorded because it nearly became a false defect report:** my
+first colour test clicked `.ht-swatch` index 1 and concluded the colour picker was dead. There are 14
+`.ht-swatch` nodes in the DOM — the first 8 belong to the lobby panel and the real ones are 8..13. The
+picker was never broken; the selector was. Same failure family as the earlier time-derived-value
+lesson: verify the probe before trusting what it reports.
+
+**Portal latch, for future sessions.** `insideness` rises only through `state.latched`, set when the
+queen is simultaneously `inAperture` and `beyondEntranceWall`. Measured directly on `nest.spec`, that
+window is z in [-26, -28] on the entrance axis — three units. A player flying in crosses it over
+several frames and latches normally. Teleporting a test queen past it never latches, which looks
+exactly like "build mode can never open". It is a test artifact, not a bug. Drive entry on rAF, or
+hold the queen inside the window for a few frames.
+
+**Open, not fixed, found while verifying:** the seed comb renders *through the trunk* and is visible
+from outside as a flat golden slab beside the entrance in the wide cinematic shots. The comb lattice is
+built on flat wall planes while the trunk is round, so near the aperture the plane pokes out through the
+bark. Cosmetic, but it is in the establishing shot of the opening. Not touched this round.
+
+## Multiplayer and progression — verification (asked by Jurek)
+
+**Headless suite:** `node work/net-node.test.mjs` -> **49 passed, 0 failed in 117.6 s, RESULT PASS**.
+Covers presence, 10 Hz motion publish with interpolation (mean error 0.043 m, worst 0.351 m, buffer delay
+136 ms), bandwidth (1.57 KB/s uplink per client projected on RTDB at 3 players), contended bank
+(40/40 deposits committed, 14 transaction retries, no lost update), single-owner authority and handover,
+frozen-owner revocation (0 dual-owner samples of 1772 over 90 s), ghost reaping, and offline progression
+(20 h away credits exactly 8 h at 25 %, never credited twice). Note this runs on the **local in-memory
+driver** — it proves the logic, not the network.
+
+**Live two-client test over real Firebase** (`driver: "firebase"`, code MPTEST8899, two tabs with
+distinct `ht.uid`):
+
+| Check | Result |
+|---|---|
+| Both clients on one hive | yes — roster `["Jurek","Ryszard"]` on both |
+| Exactly one authority | yes — A `isAuthority: true`, B `false`, `hostUid` agreed by both |
+| Shared bank | A wrote pollen 37 / resin 11; B read the identical snapshot |
+| Build debits correctly | honey store cost 2p+4r -> bank 37/11 -> 35/7 |
+| Comb replicates | cell placed by A appeared on B at (42,13,1), `owner` = A's uid, `progress` 0.04, `doneCount` 7 + `buildingCount` 1 |
+
+Roster convergence took ~25 s only because a backgrounded tab throttles its heartbeat; once the other
+tab got frames it appeared immediately. Not a defect — an artifact of two tabs where only one can be
+fronted at a time.
+
+**Progression chain, end to end** (solo hive SOLOHONEY77, real Firebase, authority held):
+place -> build completes in 6 s -> `doneCount` 7->8, honey capacity 0->25, `convertRate` 0->0.045/s ->
+ripening runs: `stores.honey` 0 -> 0.225, nectar drained 0.202, bank nectar 30 -> 29.8. Honey lives in
+`comb.stores.honey`, not in the resource bank — the HUD reads it from there.
+
+**Three of my own measurements were wrong before they were right, all the same failure family — the probe,
+not the game:**
+- Looked for honey in `bank.snapshot().honey`; it lives in `comb.stores.honey`.
+- Read "cell never finishes" while the pane was hidden; rAF was stalled, not the build. `buildSpeed()`
+  is 1, so `buildTime` is the honest 6 s.
+- Read "nobody owns the world" repeatedly; the lease renews from `net.update(dt)` in the game loop and is
+  throttled on the **wall clock**, so a synchronous burst of `net.update` calls does not renew it and a
+  hidden tab lets it lapse. Driving it on a real-time timer renewed it immediately.
+
+**Real-world consequence worth keeping:** world simulation only runs on the lease holder. If every player
+backgrounds the game, ripening and flower regrowth stop — by design, and the offline report credits 25 %
+capped at 8 h on return.
+
+## Round 2 — the comb slab, and a frame-rate number that is finally real
+
+**The slab was never the hive's comb.** It is `PLACEHOLDER_comb_cells`, 135 instances, a free-standing
+stage set the opening builds for its interior shots — parked out in the meadow, not in the hall. Nothing
+switched it off, so from the cut to daylight onward it sat beside the trunk as a golden lattice in every
+exterior shot, including the establishing shot and the title card.
+
+Two wrong fixes preceded the right one, both recorded because each looked correct until it was rendered:
+
+1. **Portal viewpoint.** `insideness` is derived from the queen, and the director parks her in the hall
+   while flying the camera outside — so the hall itself was also being drawn from outside. Added
+   `portal.setViewpoint(fn)`, set by the cinematic to its camera and released on finish, skip or dispose,
+   plus `insideHall()` containment because `sample()` is a latch that only reads 1 for a body seen crossing
+   the aperture — a camera that simply begins inside would never latch. This is a genuine fix and stays:
+   measured 0 frames where the hall was drawn while the camera stood outside.
+2. **Tying the set to `insideness`.** Wrong, and it removed the opening shot entirely: the set is in the
+   meadow, so the test that culls the hall culls the set exactly when it is wanted. Reverted.
+3. **A shot-name list.** Wrong about `launch`, whose camera is already outside; the slab survived.
+
+The fix that holds is the one the file already documents: `FLASHES` fires a bloom at `T.burst.at` (15.4 s)
+whose stated purpose is to mask "the frame where the interior shell is swapped for the world" — but nothing
+performed the swap. The static set (`comb`, `cap`, `motes`; not `workers`, which is the swarm bursting out
+and is the subject of those shots) is now hidden from that instant.
+
+Verified: `anyOnAfter154: []` — the prop is never visible at or after the authored cut — and the wide
+establishing shot that previously carried the slab renders clean.
+
+**Frame rate, measured honestly at last.** Sampling per-frame deltas and discarding gaps >= 100 ms (those
+are the harness hiding the pane, not the game): **median 16.3 ms / 61.3 fps, p95 18.5 ms / 54.1 fps** on the
+`balanced` tier. Two independent bursts agreed. Small sample — 10 live frames each — so read it as
+"vsync-locked, no obvious hitching", not as a benchmark.
