@@ -53,6 +53,20 @@ export const FLIGHT = {
   maxDt: 0.05,
 };
 
+// Aim-to-climb: pointing the camera up makes the queen climb. The climb rate is derived from
+// the forward speed she ACTUALLY has, never from the mouse — so a hovering queen sweeping the
+// camera across the build wall climbs by exactly zero, which is the whole reason build mode
+// stayed usable when this went in.
+export const FLIGHT_PITCH = {
+  deadzone: 0.08,     // rad either side of the horizon that produces no climb at all
+  scale: 0.55,        // fraction of the geometric climb angle actually flown
+  climbCap: 0.85,     // share of FLIGHT.liftSpeed the coupling may reach on its own
+  speedGateLo: 0.6,   // m/s forward speed below which the coupling is fully off
+  speedGateHi: 2.2,   // m/s forward speed at which it is fully on
+  thrustTilt: 1.0,    // how far the forward thrust vector tilts out of horizontal
+  visualClimb: 0.20,  // rad of extra nose attitude at full pitch-driven climb
+};
+
 export const CAMERA = {
   fov: 62,
   fovBoost: 73,

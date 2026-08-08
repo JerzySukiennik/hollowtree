@@ -1,0 +1,538 @@
+{
+  "world": {
+    "hive": {
+      "x": 0,
+      "y": -0.0006633962038904335,
+      "z": -30
+    },
+    "entrance": {
+      "x": 0,
+      "y": 15.99933660379611,
+      "z": -22.203176947945966
+    },
+    "spec": {
+      "centerX": 0,
+      "centerZ": -57.403176947945965,
+      "minX": -48,
+      "maxX": 48,
+      "minZ": -89.40317694794597,
+      "maxZ": -25.403176947945965,
+      "floorY": 3.1993366037961097,
+      "ceilY": 66.83933660379611,
+      "entranceY": 15.99933660379611,
+      "entrancePos": {
+        "x": 0,
+        "y": 15.99933660379611,
+        "z": -25.403176947945965
+      }
+    },
+    "seed": {
+      "x": 0.38178865574218435,
+      "y": 15.622911425257499,
+      "z": -84.48667945945716
+    }
+  },
+  "info": {
+    "flowerSamples": [
+      {
+        "near": [
+          10,
+          10
+        ],
+        "hit": {
+          "index": 383,
+          "species": {
+            "id": "spruce-seep",
+            "name": "spruce seep",
+            "geometry": "conifer",
+            "share": 0.1,
+            "zone": 0,
+            "evergreen": true,
+            "bloom": {
+              "start": 0,
+              "end": 1
+            },
+            "colors": {
+              "petal": 3099178,
+              "tip": 3955763,
+              "core": 13208124,
+              "stem": 4864548
+            },
+            "pollen": 0,
+            "nectar": 0,
+            "resin": 3.2,
+            "reserve": 6.5,
+            "regrowth": 0.14,
+            "regrowDelay": 9,
+            "scale": 1.35,
+            "petals": 0,
+            "model": "flower-spruce.glb",
+            "headAnchor": "head",
+            "height": 7.2,
+            "headHeight": 4.6,
+            "headRadius": 1.5,
+            "spread": 0.9,
+            "heads": 3,
+            "triBudget": 180
+          },
+          "speciesId": "spruce-seep",
+          "position": {
+            "x": 8.860143661499023,
+            "y": 4.7931213959728325,
+            "z": 8.31336784362793
+          },
+          "distance": 4.3048542864905475,
+          "reserve": 6.5,
+          "reserveMax": 6.5,
+          "ratio": 1,
+          "inBloom": true,
+          "bloom": 1,
+          "zone": 0,
+          "zoneName": "polana"
+        }
+      },
+      {
+        "near": [
+          -20,
+          15
+        ],
+        "hit": {
+          "index": 554,
+          "species": {
+            "id": "dandelion",
+            "name": "dandelion",
+            "geometry": "daisy",
+            "share": 0.12,
+            "zone": 0,
+            "bloom": {
+              "start": 0.83,
+              "end": 0.22
+            },
+            "colors": {
+              "petal": 16171839,
+              "tip": 16769658,
+              "core": 13733662,
+              "stem": 5077555
+            },
+            "pollen": 2.2,
+            "nectar": 0.8,
+            "resin": 0,
+            "reserve": 5,
+            "regrowth": 0.34,
+            "regrowDelay": 3.5,
+            "scale": 0.88,
+            "petals": 12,
+            "model": "flower-dandelion.glb",
+            "headAnchor": "head",
+            "height": 3.8,
+            "headHeight": 3.3,
+            "headRadius": 1,
+            "spread": 1.3,
+            "heads": 2,
+            "triBudget": 150
+          },
+          "speciesId": "dandelion",
+          "position": {
+            "x": -14.111952781677246,
+            "y": 3.0267268941095296,
+            "z": 12.559126853942871
+          },
+          "distance": 6.688391709794516,
+          "reserve": 5,
+          "reserveMax": 5,
+          "ratio": 1,
+          "inBloom": true,
+          "bloom": 1,
+          "zone": 0,
+          "zoneName": "polana"
+        }
+      },
+      {
+        "near": [
+          25,
+          -5
+        ],
+        "hit": {
+          "index": 396,
+          "species": {
+            "id": "spruce-seep",
+            "name": "spruce seep",
+            "geometry": "conifer",
+            "share": 0.1,
+            "zone": 0,
+            "evergreen": true,
+            "bloom": {
+              "start": 0,
+              "end": 1
+            },
+            "colors": {
+              "petal": 3099178,
+              "tip": 3955763,
+              "core": 13208124,
+              "stem": 4864548
+            },
+            "pollen": 0,
+            "nectar": 0,
+            "resin": 3.2,
+            "reserve": 6.5,
+            "regrowth": 0.14,
+            "regrowDelay": 9,
+            "scale": 1.35,
+            "petals": 0,
+            "model": "flower-spruce.glb",
+            "headAnchor": "head",
+            "height": 7.2,
+            "headHeight": 4.6,
+            "headRadius": 1.5,
+            "spread": 0.9,
+            "heads": 3,
+            "triBudget": 180
+          },
+          "speciesId": "spruce-seep",
+          "position": {
+            "x": 25.508743286132812,
+            "y": 4.675335277046372,
+            "z": -7.098352432250977
+          },
+          "distance": 4.2626273658179805,
+          "reserve": 6.5,
+          "reserveMax": 6.5,
+          "ratio": 1,
+          "inBloom": true,
+          "bloom": 1,
+          "zone": 0,
+          "zoneName": "polana"
+        }
+      },
+      {
+        "near": [
+          0,
+          35
+        ],
+        "hit": {
+          "index": 497,
+          "species": {
+            "id": "dandelion",
+            "name": "dandelion",
+            "geometry": "daisy",
+            "share": 0.12,
+            "zone": 0,
+            "bloom": {
+              "start": 0.83,
+              "end": 0.22
+            },
+            "colors": {
+              "petal": 16171839,
+              "tip": 16769658,
+              "core": 13733662,
+              "stem": 5077555
+            },
+            "pollen": 2.2,
+            "nectar": 0.8,
+            "resin": 0,
+            "reserve": 5,
+            "regrowth": 0.34,
+            "regrowDelay": 3.5,
+            "scale": 0.88,
+            "petals": 12,
+            "model": "flower-dandelion.glb",
+            "headAnchor": "head",
+            "height": 3.8,
+            "headHeight": 3.3,
+            "headRadius": 1,
+            "spread": 1.3,
+            "heads": 2,
+            "triBudget": 150
+          },
+          "speciesId": "dandelion",
+          "position": {
+            "x": -4.529738426208496,
+            "y": 3.3300569551096544,
+            "z": 14.530295372009277
+          },
+          "distance": 21.095293023055575,
+          "reserve": 5,
+          "reserveMax": 5,
+          "ratio": 1,
+          "inBloom": true,
+          "bloom": 1,
+          "zone": 0,
+          "zoneName": "polana"
+        }
+      },
+      {
+        "near": [
+          -35,
+          -10
+        ],
+        "hit": {
+          "index": 520,
+          "species": {
+            "id": "dandelion",
+            "name": "dandelion",
+            "geometry": "daisy",
+            "share": 0.12,
+            "zone": 0,
+            "bloom": {
+              "start": 0.83,
+              "end": 0.22
+            },
+            "colors": {
+              "petal": 16171839,
+              "tip": 16769658,
+              "core": 13733662,
+              "stem": 5077555
+            },
+            "pollen": 2.2,
+            "nectar": 0.8,
+            "resin": 0,
+            "reserve": 5,
+            "regrowth": 0.34,
+            "regrowDelay": 3.5,
+            "scale": 0.88,
+            "petals": 12,
+            "model": "flower-dandelion.glb",
+            "headAnchor": "head",
+            "height": 3.8,
+            "headHeight": 3.3,
+            "headRadius": 1,
+            "spread": 1.3,
+            "heads": 2,
+            "triBudget": 150
+          },
+          "speciesId": "dandelion",
+          "position": {
+            "x": -36.608551025390625,
+            "y": 2.590367746240574,
+            "z": -12.123603820800781
+          },
+          "distance": 3.0903077686406095,
+          "reserve": 5,
+          "reserveMax": 5,
+          "ratio": 1,
+          "inBloom": true,
+          "bloom": 1,
+          "zone": 0,
+          "zoneName": "polana"
+        }
+      },
+      {
+        "near": [
+          40,
+          25
+        ],
+        "hit": {
+          "index": 547,
+          "species": {
+            "id": "dandelion",
+            "name": "dandelion",
+            "geometry": "daisy",
+            "share": 0.12,
+            "zone": 0,
+            "bloom": {
+              "start": 0.83,
+              "end": 0.22
+            },
+            "colors": {
+              "petal": 16171839,
+              "tip": 16769658,
+              "core": 13733662,
+              "stem": 5077555
+            },
+            "pollen": 2.2,
+            "nectar": 0.8,
+            "resin": 0,
+            "reserve": 5,
+            "regrowth": 0.34,
+            "regrowDelay": 3.5,
+            "scale": 0.88,
+            "petals": 12,
+            "model": "flower-dandelion.glb",
+            "headAnchor": "head",
+            "height": 3.8,
+            "headHeight": 3.3,
+            "headRadius": 1,
+            "spread": 1.3,
+            "heads": 2,
+            "triBudget": 150
+          },
+          "speciesId": "dandelion",
+          "position": {
+            "x": 27.080190658569336,
+            "y": 2.8340764403868235,
+            "z": 2.2595179080963135
+          },
+          "distance": 26.19837560525455,
+          "reserve": 5,
+          "reserveMax": 5,
+          "ratio": 1,
+          "inBloom": true,
+          "bloom": 1,
+          "zone": 0,
+          "zoneName": "polana"
+        }
+      },
+      {
+        "near": [
+          15,
+          -55
+        ],
+        "hit": {
+          "index": 564,
+          "species": {
+            "id": "dandelion",
+            "name": "dandelion",
+            "geometry": "daisy",
+            "share": 0.12,
+            "zone": 0,
+            "bloom": {
+              "start": 0.83,
+              "end": 0.22
+            },
+            "colors": {
+              "petal": 16171839,
+              "tip": 16769658,
+              "core": 13733662,
+              "stem": 5077555
+            },
+            "pollen": 2.2,
+            "nectar": 0.8,
+            "resin": 0,
+            "reserve": 5,
+            "regrowth": 0.34,
+            "regrowDelay": 3.5,
+            "scale": 0.88,
+            "petals": 12,
+            "model": "flower-dandelion.glb",
+            "headAnchor": "head",
+            "height": 3.8,
+            "headHeight": 3.3,
+            "headRadius": 1,
+            "spread": 1.3,
+            "heads": 2,
+            "triBudget": 150
+          },
+          "speciesId": "dandelion",
+          "position": {
+            "x": 16.32387351989746,
+            "y": 2.4375831714745573,
+            "z": -57.74989318847656
+          },
+          "distance": 3.584218618592435,
+          "reserve": 5,
+          "reserveMax": 5,
+          "ratio": 1,
+          "inBloom": true,
+          "bloom": 1,
+          "zone": 0,
+          "zoneName": "polana"
+        }
+      }
+    ],
+    "hiveEntrance": {
+      "x": 0,
+      "y": 15.99933660379611,
+      "z": -22.203176947945966
+    },
+    "heights": {
+      "0,-30": -0.0006633962038904335,
+      "0,0": 0,
+      "0,40": -0.009586319586055037,
+      "30,20": 0.005446917196321689,
+      "-40,10": 0.21306333589700904,
+      "60,-10": 0.31045669758761496,
+      "-60,-40": 1.1803661761460484,
+      "20,60": 0.027574573402053548,
+      "-25,-70": 1.5818049716360787
+    },
+    "spec": {
+      "centerX": 0,
+      "centerZ": -57.403176947945965,
+      "minX": -48,
+      "maxX": 48,
+      "minZ": -89.40317694794597,
+      "maxZ": -25.403176947945965,
+      "floorY": 3.1993366037961097,
+      "ceilY": 66.83933660379611,
+      "entranceY": 15.99933660379611,
+      "entranceRadius": 3.2,
+      "entrancePos": {
+        "x": 0,
+        "y": 15.99933660379611,
+        "z": -25.403176947945965
+      },
+      "entranceWall": 0,
+      "entranceSign": 1,
+      "entranceAxisZ": true
+    },
+    "seedAnchor": {
+      "col": 178,
+      "row": 7,
+      "layer": 0,
+      "position": {
+        "x": 0.38178865574218435,
+        "y": 15.622911425257499,
+        "z": -84.48667945945716
+      }
+    },
+    "unlocked": [
+      "honey",
+      "pollen",
+      "brood",
+      "queen",
+      "wax"
+    ],
+    "zones": [
+      "mesh",
+      "bands",
+      "state",
+      "attachComb",
+      "setEffects",
+      "update",
+      "zoneIndexAt",
+      "distanceFromCenter",
+      "openCount",
+      "limit",
+      "requirement",
+      "requirementText",
+      "isOpen",
+      "dispose"
+    ],
+    "netKeys": [
+      "ready",
+      "peers",
+      "publishSelf",
+      "update",
+      "dispose",
+      "roster",
+      "uid",
+      "code",
+      "mode",
+      "driver",
+      "profile",
+      "offlineReport",
+      "hostUid",
+      "motionSends",
+      "setPresence",
+      "onPresence",
+      "onPeerJoin",
+      "onPeerLeave",
+      "bank",
+      "world",
+      "flowers",
+      "weather",
+      "comb",
+      "authority",
+      "stats"
+    ],
+    "bankKeys": [
+      "kinds",
+      "snapshot",
+      "deposit",
+      "spend",
+      "onChange",
+      "setRate",
+      "contributions"
+    ]
+  }
+}

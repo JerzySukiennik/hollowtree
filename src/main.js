@@ -664,6 +664,12 @@ async function boot() {
       gathering: gather ? gather.state.charge : 0,
     });
 
+    // Driven from the render loop, which runs in every mode — comb.update() only runs in
+    // play, so deciding this inside it meant the marker was never hidden for the cinematic.
+    if (comb && typeof comb.setStartLabelVisible === 'function') {
+      comb.setStartLabelVisible(mode === 'play');
+    }
+
     if (post) {
       try {
         post.render(dt);

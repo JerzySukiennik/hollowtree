@@ -1,0 +1,24 @@
+{
+  "database": {
+    "rules": "database.rules.json"
+  },
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "work/**",
+      "v1/**",
+      "Niepotrzebne/**",
+      "*.md"
+    ],
+    "headers": [
+      {
+        "//": "Nothing here is content-hashed, so the browser must revalidate rather than reuse. An ETag makes an unchanged file a 304, so this costs almost nothing and stops a deploy from taking an hour to reach a phone.",
+        "source": "**",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+      }
+    ]
+  }
+}

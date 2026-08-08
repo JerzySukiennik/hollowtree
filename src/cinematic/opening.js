@@ -23,6 +23,15 @@ export function createOpeningCinematic(options) {
     post: o.post || (typeof window !== 'undefined' ? window.hollowtreePost : null) || null,
     interior: o.interior || (nest && nest.interior) || null,
     portal: o.portal || (nest && nest.portal) || null,
+    // The queen now hatches from the hive's REAL starting comb — the seven-cell flower on
+    // the build wall that the player finds under the START marker — so the opening needs the
+    // live comb and its lattice, not a prop. main.js does not hand either to the cinematic,
+    // but both are published on window.hollowtree.nest before the menu can launch a session.
+    comb: o.comb || (nest && nest.comb) || null,
+    grid: o.grid || (nest && nest.grid) || (nest && nest.interior && nest.interior.grid) || null,
+    // The time-lapse drives the real weather schedule and the real sky clock forward and
+    // hands both back; both live on window.hollowtree for the same reason.
+    weather: o.weather || (host && host.weather) || null,
     // main.js does not hand the audio system to the cinematic, but it publishes it on
     // window.hollowtree before the menu can launch a session, so the opening can pick it up here
     // without a change in a file this module does not own.

@@ -992,13 +992,6 @@ export function createComb(options) {
   function update(dt) {
     if (disposed || !(dt > 0)) return;
 
-    // Per frame, not per recompute: the comb does not change during the opening, so a check
-    // that only ran on change would leave the marker sitting in the middle of the cinematic.
-    if (startLabel) {
-      const host = typeof window !== 'undefined' ? window.hollowtree : null;
-      const seedCount = Math.max(1, ((COMB_TUNING.seed && COMB_TUNING.seed.cells) | 0) || 1);
-      startLabel.visible = cells.size <= seedCount && !(host && host.mode === 'cinematic');
-    }
 
     // Only cells still growing touch the GPU, and only on a fixed tick. A finished comb
     // of any size costs nothing here.
@@ -1067,6 +1060,16 @@ export function createComb(options) {
     // off-screen marker or a compass arrow can be written without any lattice maths.
     seedAnchor,
     nearestCell,
+    // Whether the START marker is allowed on screen at all. It used to be decided inside
+    // update(), which main.js only calls while mode === 'play' — so the check was dead code and
+    // the marker sat in the middle of the opening cinematic. The caller knows the mode; comb
+    // only knows whether the hive is still untouched.
+    setStartLabelVisible(allowed) {
+      if (!startLabel) return;
+      const seedCount = Math.max(1, ((COMB_TUNING.seed && COMB_TUNING.seed.cells) | 0) || 1);
+      startLabel.visible = Boolean(allowed) && cells.size <= seedCount;
+    },
+
     // What is actually in the stores right now, from whichever wallet is behind this hive.
     // The build panel needs it to show room left rather than raw capacity.
     bankSnapshot() {

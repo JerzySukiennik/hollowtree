@@ -1,7 +1,16 @@
 // Hollowtree — queen flight kinematics: thrust, drag, banking, hover bob, terrain follow. Pure state, no rendering.
 
 import { Vector3, Quaternion, Euler, MathUtils } from "three";
-import { FLIGHT, FLIGHT_FEEL, LOOP } from "../config.js";
+import { CAMERA, FLIGHT, FLIGHT_FEEL, FLIGHT_PITCH, LOOP } from "../config.js";
+
+// Pitch-coupled flight — aim up and she climbs, aim down and she dives, the way an
+// aircraft trades a thrust vector for altitude. Space/C stay a direct override on top.
+//
+// The coupling is deliberately proportional to how fast she is actually flying forward,
+// not to the stick: a hovering queen sweeping the camera over a build wall has no forward
+// speed, so it contributes nothing and she stays put. That single choice is what keeps
+// build mode usable, so `speedGate*` is load-bearing, not polish.
+//
 
 const _wish = new Vector3();
 const _fwd = new Vector3();
@@ -168,8 +177,23 @@ export function createFlight(terrain) {
     bob: 0,
     alpha: 1,
     grounded: false,
+    aim: 0,
+    pitchClimb: 0,
     altitude: 0,
     terrain,
+    // Put the queen somewhere, properly. `position` is a getter over an interpolation between
+    // the last two fixed steps, so assigning to it does nothing at all, and writing only
+    // `simPosition` leaves the rendered position a step behind — which is why teleporting a
+    // test queen produced an 8.99 m jump on the next frame. This moves all three at once.
+    teleport(v) {
+      if (!v) return state;
+      base.copy(v);
+      prevPos.copy(v);
+      curPos.copy(v);
+      renderPosition.copy(v);
+      velocity.set(0, 0, 0);
+      return state;
+    },
     get position() {
       sampleRender();
       return renderPosition;
@@ -193,6 +217,19 @@ export function createFlight(terrain) {
     const inB = input && input.boost ? 1 : 0;
     const yawRef = typeof cameraYaw === "number" ? cameraYaw : heading;
 
+    // Camera pitch drives the thrust vector. `input.pitch` is clamped by INPUT.pitchClamp
+    // (1.2 rad), which is *wider* than what the rig will actually look along, so re-clamp
+    // to the camera's own limits — otherwise she would climb along an angle no player can see.
+    const camPitch = MathUtils.clamp(
+      input && typeof input.pitch === "number" ? input.pitch : 0,
+      CAMERA.pitchMin,
+      CAMERA.pitchMax
+    );
+    // Deadzone subtracted rather than gated, so authority ramps from zero instead of
+    // snapping on the moment the player drifts a degree off the horizon.
+    const aim =
+      Math.sign(camPitch) * Math.max(0, Math.abs(camPitch) - FLIGHT_PITCH.deadzone);
+
     const prevBoost = boostAmount;
     boostAmount += (inB - boostAmount) * (1 - damp(FLIGHT.boostResponse, dt));
     if (boostAmount - prevBoost > 0.0005 && boostAmount < 0.85) {
@@ -213,7 +250,15 @@ export function createFlight(terrain) {
     fwdDrive += (fTarget - fwdDrive) * (1 - damp(FLIGHT_FEEL.throttleSpool, dt));
     strafeDrive += (sTarget - strafeDrive) * (1 - damp(FLIGHT_FEEL.strafeSpool, dt));
 
-    _wish.set(0, 0, 0).addScaledVector(_fwd, fwdDrive).addScaledVector(_right, strafeDrive);
+    // Tilting the thrust vector out of horizontal costs horizontal authority, exactly as
+    // it does on a real airframe: a steep climb is slower over the ground. This also
+    // self-limits the climb, because the climb rate below is read off forward speed.
+    const tiltCos = MathUtils.lerp(1, Math.cos(aim), FLIGHT_PITCH.thrustTilt);
+
+    _wish
+      .set(0, 0, 0)
+      .addScaledVector(_fwd, fwdDrive * tiltCos)
+      .addScaledVector(_right, strafeDrive);
     const wishLen = _wish.length();
     if (wishLen > 1) _wish.multiplyScalar(1 / wishLen);
     const throttle = Math.min(wishLen, 1);
@@ -242,9 +287,26 @@ export function createFlight(terrain) {
       planar = target;
     }
 
+    // Climb rate the aim asks for. Read off the forward component of the velocity she
+    // actually has, so it is thrust that lifts her, not the mouse: no forward motion,
+    // no climb, however far up she is looking.
+    const fwdSpeed = velocity.x * _fwd.x + velocity.z * _fwd.z;
+    const speedGate = smoothstep(FLIGHT_PITCH.speedGateLo, FLIGHT_PITCH.speedGateHi, Math.abs(fwdSpeed));
+    const climbCap = FLIGHT.liftSpeed * FLIGHT_PITCH.climbCap;
+    const pitchClimb = MathUtils.clamp(
+      fwdSpeed * Math.tan(aim) * FLIGHT_PITCH.scale * speedGate,
+      -climbCap,
+      climbCap
+    );
+
     liftDrive += (inL - liftDrive) * (1 - damp(FLIGHT.liftSpool, dt));
     velocity.y += liftDrive * FLIGHT.liftAccel * dt;
-    velocity.y *= damp(FLIGHT.liftDamp + (Math.abs(inL) < 0.01 ? FLIGHT.liftIdleDamp : 0), dt);
+    // Vertical damping now relaxes toward the aim's climb rate instead of toward zero.
+    // At `pitchClimb === 0` this is algebraically the old `velocity.y *= damp(...)`, so
+    // level flight, hover bob and the ground spring behave exactly as they did before.
+    // Space/C still add on top and simply decay back to the aimed climb when released.
+    const vertDamp = damp(FLIGHT.liftDamp + (Math.abs(inL) < 0.01 ? FLIGHT.liftIdleDamp : 0), dt);
+    velocity.y = pitchClimb + (velocity.y - pitchClimb) * vertDamp;
     const liftCap = FLIGHT.liftSpeed * (1 + boostAmount * 0.45);
     if (Math.abs(velocity.y) > liftCap) {
       velocity.y = MathUtils.lerp(Math.sign(velocity.y) * liftCap, velocity.y, damp(FLIGHT.speedCapResponse, dt));
@@ -318,9 +380,15 @@ export function createFlight(terrain) {
     bankVel += (bw * bw * (bankTarget - bank) - 2 * bw * bankVel) * dt;
     bank += bankVel * dt;
 
+    // Visual attitude. The existing climb term already tracks the new motion because it
+    // reads velocity.y, but at a few tenths of a radian per 5 m/s it under-reads a
+    // deliberate climb. The extra term keys off `pitchClimb`, not raw aim, so the nose can
+    // never point somewhere the body is not actually going — including when the speed gate
+    // has switched the coupling off during a hover.
     let pitchTarget =
       -fwdAccelSmooth * FLIGHT.pitchFromAccel +
-      velocity.y * FLIGHT.pitchFromClimb -
+      velocity.y * FLIGHT.pitchFromClimb +
+      (pitchClimb / climbCap) * FLIGHT_PITCH.visualClimb -
       throttle * speedRatio * FLIGHT.pitchFromThrottle;
     pitchTarget = MathUtils.clamp(pitchTarget, -FLIGHT.pitchMax, FLIGHT.pitchMax);
 
@@ -360,6 +428,8 @@ export function createFlight(terrain) {
     state.hoverFactor = hoverFactor;
     state.bob = bobOffset;
     state.grounded = grounded;
+    state.aim = aim;
+    state.pitchClimb = pitchClimb;
     state.altitude = base.y - groundHeight(base.x, base.z);
     state.alpha = 1;
     return state;

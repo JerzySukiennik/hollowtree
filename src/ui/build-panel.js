@@ -286,10 +286,9 @@ export function createBuildPanel(handlers) {
     if (shown) return;
     shown = true;
     root.classList.add('is-on');
-    if (!seenBoard()) {
-      markBoardSeen();
-      board.show();
-    }
+    // The board used to open itself the first time a player ever entered build mode. Jurek
+    // asked for it off by default: it lands on top of the thing you came here to do. The
+    // button and the R key are how you get it, and the panel names both.
   }
 
   function hide() {

@@ -1,7 +1,8 @@
 // Hollowtree — the hollow: a rectangular great hall, authored shell when present and a procedural stand-in otherwise, plus galleries, light wells, dust, AABB colliders and camera containment.
 
 import * as THREE from 'three';
-import { INTERIOR, HIVE, FLIGHT } from '../config.js';
+import { INTERIOR, HIVE, FLIGHT, COMB } from '../config.js';
+import { COMB_TUNING } from '../config.comb.js';
 import { createHexGrid } from './hexgrid.js';
 
 const _v = new THREE.Vector3();
@@ -26,7 +27,7 @@ const BUILD_WALL = {
   // One raking lamp, close to the wall and off to one side, so the comb's hex relief
   // catches a grazing light and reads as geometry rather than as a flat brown patch.
   rakeColor: 0xffc282,
-  rakeIntensity: 62.0,
+  rakeIntensity: 78.0,
   rakeRange: 38.0,
   rakeDecay: 1.45,
   rakeOffset: 7.0,          // stand-off from the wall plane
@@ -41,11 +42,45 @@ const BUILD_WALL = {
   tintFalloffV: 0.34,       // up the wall, as a fraction of hall height
   // A soft glow panel just behind the comb: additive, depth-tested, so the comb cells
   // occlude it and read as relief against a lit wall instead of brown-on-brown.
+  //
+  // Softened and spread once the wall behind it became flat: a radial gradient painted on
+  // lumpy rock reads as light catching the folds, and the same gradient painted on a flat
+  // face reads as an oval of paint. Wider, weaker, and the raking lamp does more of the work.
   glowColor: 0xffb257,
-  glowOpacity: 0.34,
-  glowWidth: 0.52,          // fraction of the wall's length
-  glowHeight: 0.34,         // fraction of hall height
+  glowOpacity: 0.26,
+  glowWidth: 0.66,          // fraction of the wall's length
+  glowHeight: 0.46,         // fraction of hall height
   glowOffset: 0.10,         // in front of the wall plane, behind the comb layer
+};
+
+// The comb is drawn on a FLAT plane at a fixed z (hexgrid.js puts cell centres at
+// cavity plane + COMB.wallOffset, and build-mode rays are analytic against those planes),
+// but the authored rock is not flat: measured under the seed comb it wandered from
+// z -85.43 to -86.98 while the cells sat at -84.49, so the comb hovered 0.94-2.50 units
+// proud of the stone and at a different depth in every cell. The lattice cannot move
+// without breaking the build ray, so the STONE moves: one bay of the build wall is
+// dragged onto a single flat face exactly behind the cells, blended back into the
+// authored rock over a margin so there is no crack, and given plinth / jambs / shelf /
+// cornice so the flat field reads as carved architecture rather than as a grey plane.
+const BUILD_BAY = {
+  halfWidth: 22.0,          // half the flat field, along the wall from its centre
+  topRise: 9.5,             // top of the field, above the aperture height
+  margin: 6.5,              // blend band into the authored rock, all four sides
+  depthFade: 9.0,           // rock this far into the room is left alone
+  depthOuter: 13.0,         // ...and this far is not even considered part of the wall
+  depthInner: 16.0,         // how deep behind the plane rock is still dragged forward
+  cols: 30,                 // field subdivision — enough for the rake light to gradate
+  rows: 16,
+  mottle: 0.13,             // stone grain in the field's vertex colour: the geometry has
+  mottleScale: 0.42,        // to stay dead flat for the comb, so the variety is colour only
+  footDrop: 2.6,            // how far below the cavity floor the field runs, to be buried
+  jambWidth: 1.4,           // the piers that close the field at either end
+  jambOut: 1.0,
+  shelfOut: 1.15,           // the shelf the comb sits on
+  shelfThick: 0.34,
+  shelfInset: 1.2,          // shelf stops short of the jambs by this much
+  corniceHeight: 0.95,      // the lintel that caps the field and hides the top blend
+  corniceOut: 1.3,
 };
 
 const SHAFTS = {
@@ -350,6 +385,221 @@ function measureCavity(shell, spec) {
     };
   }
   return cavity;
+}
+
+// ------------------------------------------------------------------ cavity tiles
+//
+// measureCavity() above fits ONE plane per face, at comb height. That is right for the
+// lattice — a flat lattice wants a flat reference — and wrong for collision, because the
+// hollow is not a box: measured on the shipped model the build wall stands at z -86.1 at
+// aperture height and at z -80.3 near the ceiling, and the minX wall walks from x -45.4
+// to x -33.1 over the same rise. A single plane per face therefore leaves the top two
+// thirds of every wall with its collider three to eight units BEHIND the stone you can
+// see, and because the shell is FrontSide the queen who flies into it does not stop and
+// does not even see rock — the wall vanishes and she is looking out of the tree. That is
+// the "walls with no collision at all" report: not a missing box, a box in the wrong place.
+//
+// So the collider shell is measured as a grid of tiles per face instead. The surface is a
+// polygon soup, and the extreme of a flat triangle along an axis is always at one of its
+// vertices, so binning the shell's VERTICES into tiles and taking a room-ward percentile
+// per tile is both exact enough and O(vertices) — no ray casting, no load-time cost worth
+// measuring. Each tile becomes a slab running from the hall's bounding box in to its own
+// plane, so the union is a closed staircase with no seams to slip through.
+const TILE_U = 12;
+const TILE_V = 14;
+const TILE_F = 12;
+// Lean hard toward the nearest stone — a tile that stops short of its own bulge is a wall
+// you fly through, which is the whole complaint — but drop the most extreme few per cent,
+// because one stray vertex would otherwise put an invisible wall across a whole tile.
+const TILE_Q = 0.005;
+// Surface sampling: roughly one reading per world unit along a triangle edge, capped so a
+// single enormous face cannot blow the load-time budget.
+const SAMPLE_STEP = 2.2;
+const SAMPLE_MAX = 10;
+
+// Which face a vertex belongs to: the one it is nearest to, in units of that axis' span,
+// so a tall thin hall does not read every vertex as floor.
+function faceOf(p, spec) {
+  const w = Math.max(1e-3, spec.width);
+  const d = Math.max(1e-3, spec.depth);
+  const h = Math.max(1e-3, spec.height);
+  const dist = [
+    (p.x - spec.minX) / w,
+    (spec.maxX - p.x) / w,
+    (p.z - spec.minZ) / d,
+    (spec.maxZ - p.z) / d,
+    (p.y - spec.floorY) / h,
+    (spec.ceilY - p.y) / h,
+  ];
+  let best = 0;
+  for (let i = 1; i < 6; i++) if (dist[i] < dist[best]) best = i;
+  return best;
+}
+
+function tileIndex(t, n) {
+  return Math.min(n - 1, Math.max(0, Math.floor(t * n)));
+}
+
+function measureCavityTiles(shell, spec, cavity) {
+  const faces = [
+    { key: 'minX', axis: 'x', roomward: 1, nu: TILE_F, nv: TILE_V },   // surface at low x, room is at higher x
+    { key: 'maxX', axis: 'x', roomward: -1, nu: TILE_F, nv: TILE_V },
+    { key: 'minZ', axis: 'z', roomward: 1, nu: TILE_U, nv: TILE_V },
+    { key: 'maxZ', axis: 'z', roomward: -1, nu: TILE_U, nv: TILE_V },
+    { key: 'floorY', axis: 'y', roomward: 1, nu: TILE_U, nv: TILE_F },
+    { key: 'ceilY', axis: 'y', roomward: -1, nu: TILE_U, nv: TILE_F },
+  ];
+  const grids = faces.map((f) => ({ f, bins: new Array(f.nu * f.nv).fill(null) }));
+  const tiles = { measured: false, faces: {} };
+  if (!shell) return tiles;
+
+  const meshes = [];
+  shell.traverse((child) => {
+    if (child.isMesh && /shell/i.test(child.name || '')) meshes.push(child);
+  });
+  if (!meshes.length) return tiles;
+  shell.updateMatrixWorld(true);
+
+  const p = new THREE.Vector3();
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const cc = new THREE.Vector3();
+  const spanX = Math.max(1e-3, spec.maxX - spec.minX);
+  const spanZ = Math.max(1e-3, spec.maxZ - spec.minZ);
+  const spanY = Math.max(1e-3, spec.ceilY - spec.floorY);
+
+  function drop(point) {
+    const g = grids[faceOf(point, spec)];
+    const f = g.f;
+    // u and v are the two axes tangential to this face, normalised over the hall box.
+    let u;
+    let v;
+    if (f.axis === 'x') { u = (point.z - spec.minZ) / spanZ; v = (point.y - spec.floorY) / spanY; }
+    else if (f.axis === 'z') { u = (point.x - spec.minX) / spanX; v = (point.y - spec.floorY) / spanY; }
+    else { u = (point.x - spec.minX) / spanX; v = (point.z - spec.minZ) / spanZ; }
+    const k = tileIndex(u, f.nu) * f.nv + tileIndex(v, f.nv);
+    const list = g.bins[k] || (g.bins[k] = []);
+    list.push(f.axis === 'x' ? point.x : (f.axis === 'y' ? point.y : point.z));
+  }
+
+  // Sample the SURFACE, not just its corners. The hall is low-poly: one triangle of the
+  // minX wall spans four collider tiles, and its nearest point to the room is in the
+  // middle of it, not at any of its vertices. Binning corners alone left the tile plane
+  // three to six units behind the stone near the ceiling and the queen walked straight
+  // through it. Each triangle is walked at roughly SAMPLE_STEP so every tile it crosses
+  // gets a reading taken inside itself.
+  for (const mesh of meshes) {
+    const pos = mesh.geometry.getAttribute('position');
+    if (!pos) continue;
+    const index = mesh.geometry.getIndex();
+    const count = index ? index.count : pos.count;
+    for (let i = 0; i < count; i += 3) {
+      const i0 = index ? index.getX(i) : i;
+      const i1 = index ? index.getX(i + 1) : i + 1;
+      const i2 = index ? index.getX(i + 2) : i + 2;
+      a.fromBufferAttribute(pos, i0).applyMatrix4(mesh.matrixWorld);
+      b.fromBufferAttribute(pos, i1).applyMatrix4(mesh.matrixWorld);
+      cc.fromBufferAttribute(pos, i2).applyMatrix4(mesh.matrixWorld);
+      const longest = Math.max(a.distanceTo(b), b.distanceTo(cc), cc.distanceTo(a));
+      const n = Math.min(SAMPLE_MAX, Math.max(1, Math.ceil(longest / SAMPLE_STEP)));
+      for (let j = 0; j <= n; j++) {
+        for (let k = 0; k + j <= n; k++) {
+          const wa = 1 - (j + k) / n;
+          const wb = j / n;
+          const wc = k / n;
+          p.set(
+            a.x * wa + b.x * wb + cc.x * wc,
+            a.y * wa + b.y * wb + cc.y * wc,
+            a.z * wa + b.z * wb + cc.z * wc
+          );
+          drop(p);
+        }
+      }
+    }
+  }
+
+  for (const g of grids) {
+    const f = g.f;
+    const fallback = cavity[f.key];
+    const lo = f.axis === 'x' ? spec.minX : (f.axis === 'y' ? spec.floorY : spec.minZ);
+    const hi = f.axis === 'x' ? spec.maxX : (f.axis === 'y' ? spec.ceilY : spec.maxZ);
+    const mid = (lo + hi) * 0.5;
+    const planes = new Float64Array(f.nu * f.nv);
+    const solved = new Uint8Array(f.nu * f.nv);
+    for (let k = 0; k < planes.length; k++) {
+      const list = g.bins[k];
+      let value = fallback;
+      if (list && list.length >= 3) {
+        solved[k] = 1;
+        // roomward > 0 means the surface is at a LOW coordinate and the nearest stone is
+        // the largest value, so the room-ward percentile is the high one.
+        value = percentile(list, f.roomward > 0 ? 1 - TILE_Q : TILE_Q);
+        tiles.measured = true;
+      }
+      // Two clamps, and the first is the important one. A tile is only ever allowed to be
+      // MORE restrictive than the flat cavity plane, never less: where the hollow's
+      // cross-section does not reach a face at all — high corners, the rock above the
+      // aperture — the binned vertices are whatever happens to fall nearest, and trusting
+      // them opens a hole straight out of the hall. Restricting only inward means the
+      // measured box stays the outer bound it has always been, and the tiles do nothing
+      // but pull it in to the stone. The second clamp stops one tile eating the room.
+      value = f.roomward > 0 ? Math.max(value, fallback) : Math.min(value, fallback);
+      value = Math.min(Math.max(value, lo), hi);
+      if (f.roomward > 0) value = Math.min(value, mid - 2);
+      else value = Math.max(value, mid + 2);
+      planes[k] = value;
+    }
+    // Tiles with no stone of their own. Near the ceiling the hollow narrows until a wall
+    // face simply stops existing — every vertex up there is nearer the ceiling, so the wall
+    // tile gets nothing and would fall back to the flat plane, three to six units behind
+    // the stone the queen can see. Inherit the most restrictive solved neighbour instead:
+    // where a face has run out, the last real reading below it is the honest answer.
+    for (let pass = 0; pass < Math.max(f.nu, f.nv); pass++) {
+      let changed = false;
+      for (let iu = 0; iu < f.nu; iu++) {
+        for (let iv = 0; iv < f.nv; iv++) {
+          const k = iu * f.nv + iv;
+          if (solved[k]) continue;
+          let best = null;
+          const look = [
+            iv > 0 ? k - 1 : -1,
+            iv < f.nv - 1 ? k + 1 : -1,
+            iu > 0 ? k - f.nv : -1,
+            iu < f.nu - 1 ? k + f.nv : -1,
+          ];
+          for (const j of look) {
+            if (j < 0 || !solved[j]) continue;
+            const value = planes[j];
+            if (best === null || (f.roomward > 0 ? value > best : value < best)) best = value;
+          }
+          if (best === null) continue;
+          planes[k] = f.roomward > 0 ? Math.max(planes[k], best) : Math.min(planes[k], best);
+          solved[k] = 2;
+          changed = true;
+        }
+      }
+      if (!changed) break;
+      for (let k = 0; k < solved.length; k++) if (solved[k] === 2) solved[k] = 1;
+    }
+    tiles.faces[f.key] = { ...f, planes };
+  }
+  return tiles;
+}
+
+// The local surface of one face at a point, for camera containment. Falls back to the
+// flat cavity when the tiles were never measured (procedural stand-in).
+function tilePlaneAt(tiles, cavity, spec, key, a, b) {
+  const face = tiles && tiles.faces ? tiles.faces[key] : null;
+  if (!face) return cavity[key];
+  const spanX = Math.max(1e-3, spec.maxX - spec.minX);
+  const spanZ = Math.max(1e-3, spec.maxZ - spec.minZ);
+  const spanY = Math.max(1e-3, spec.ceilY - spec.floorY);
+  let u;
+  let v;
+  if (face.axis === 'x') { u = (a - spec.minZ) / spanZ; v = (b - spec.floorY) / spanY; }
+  else if (face.axis === 'z') { u = (a - spec.minX) / spanX; v = (b - spec.floorY) / spanY; }
+  else { u = (a - spec.minX) / spanX; v = (b - spec.minZ) / spanZ; }
+  return face.planes[tileIndex(u, face.nu) * face.nv + tileIndex(v, face.nv)];
 }
 
 // The one buildable wall, derived the same way the hex lattice derives it: walls run
@@ -746,6 +996,211 @@ function tintBuildWall(model, spec) {
   });
 }
 
+// ------------------------------------------------------------------ the build bay
+//
+// Where the flat face has to be, in absolute terms: the comb's cells are prisms centred
+// on the lattice plane + COMB.wallOffset and COMB.cellDepth * depthFill deep, so their
+// BACK faces sit half a prism behind that. Put the stone exactly there and the comb is
+// flush — resting on the wall, not floating in front of it — without moving one cell.
+function bayOf(spec, grid) {
+  const w = spec.buildWall;
+  if (!w) return null;
+  const cav = spec.cavity || spec;
+  const normal = w.normal.clone();
+  // u must be chosen so that u x up = normal, or the field's triangles face into the rock.
+  const tangent = new THREE.Vector3(0, 1, 0).cross(normal).normalize();
+  const faceInset = COMB.wallOffset - COMB.cellDepth * COMB_TUNING.depthFill * 0.5;
+
+  // The shelf lands on a lattice row boundary, directly under the lowest row of the
+  // starting comb, so it reads as the course the comb was laid on rather than as a band
+  // cutting a row of cells in half.
+  const dv = grid && grid.dv > 0 ? grid.dv : 1;
+  const rowBase = grid && Number.isFinite(grid.rowBase) ? grid.rowBase : cav.floorY + COMB.rowPad;
+  const seedRow = Math.max(1, Math.round((spec.entranceY - rowBase) / dv));
+  const shelfTop = rowBase + (seedRow - 1) * dv - dv * 0.5;
+
+  return {
+    normal,
+    tangent,
+    centre: w.centre.clone(),
+    faceInset,
+    halfWidth: Math.min(BUILD_BAY.halfWidth, w.half - 4),
+    // The hollow's floor sweeps up to meet this wall and lands anywhere between y 7.4 and
+    // 11.3 along the bay, so the field starts BELOW the lowest of that: the floor buries
+    // its bottom edge instead of a seam hanging in the air where the floor happens to dip.
+    vBot: cav.floorY - BUILD_BAY.footDrop,
+    vTop: Math.min(cav.ceilY - 6, spec.entranceY + BUILD_BAY.topRise),
+    shelfTop,
+    shelfBottom: shelfTop - BUILD_BAY.shelfThick,
+  };
+}
+
+// 0..1 — how much of this vertex belongs to the flat field. One at the field, zero out in
+// the authored rock, smooth in between, so the seam is a fold in the stone and not a crack.
+function bayWeight(bay, u, v, d) {
+  const across = 1 - smoothstep(bay.halfWidth, bay.halfWidth + BUILD_BAY.margin, Math.abs(u));
+  if (across <= 0) return 0;
+  const up = (1 - smoothstep(bay.vTop, bay.vTop + BUILD_BAY.margin, v))
+    * smoothstep(bay.vBot - BUILD_BAY.margin, bay.vBot, v);
+  if (up <= 0) return 0;
+  const depth = 1 - smoothstep(BUILD_BAY.depthFade, BUILD_BAY.depthOuter, d);
+  return across * up * depth;
+}
+
+// Drag the authored rock of the build wall onto the comb's plane. Only the shell moves:
+// ledges, deco and pools are separate meshes and keep their own shapes.
+const _bp = new THREE.Vector3();
+const _bq = new THREE.Vector3();
+const _binv = new THREE.Matrix4();
+function flattenBuildWall(model, spec, bay) {
+  if (!bay) return 0;
+  // Only vertices that belong to the build WALL. The hollow's floor sweeps up to meet the
+  // stone and reaches thirteen units out from the wall plane, so a purely distance-based
+  // test drags a strip of floor onto the wall and craters it; faceOf() is the same test
+  // the collider tiles use, so wall and floor never disagree about who owns a vertex.
+  const wallFace = [3, 1, 2, 0][spec.buildWall.wall];
+  let moved = 0;
+  model.updateMatrixWorld(true);
+  model.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    if (!/shell/i.test(child.name || '')) return;
+    const pos = child.geometry.getAttribute('position');
+    if (!pos) return;
+    _binv.copy(child.matrixWorld).invert();
+    let touched = false;
+    for (let i = 0; i < pos.count; i++) {
+      _bp.fromBufferAttribute(pos, i).applyMatrix4(child.matrixWorld);
+      if (faceOf(_bp, spec) !== wallFace) continue;
+      _bq.copy(_bp).sub(bay.centre);
+      const d = bay.normal.dot(_bq);
+      if (d > BUILD_BAY.depthOuter || d < -BUILD_BAY.depthInner) continue;
+      const k = bayWeight(bay, bay.tangent.dot(_bq), _bp.y, d);
+      if (k <= 0.001) continue;
+      _bp.addScaledVector(bay.normal, (bay.faceInset - d) * k);
+      _bp.applyMatrix4(_binv);
+      pos.setXYZ(i, _bp.x, _bp.y, _bp.z);
+      touched = true;
+      moved++;
+    }
+    if (touched) {
+      pos.needsUpdate = true;
+      child.geometry.computeBoundingSphere();
+      if (child.geometry.boundingBox) child.geometry.computeBoundingBox();
+    }
+  });
+  return moved;
+}
+
+// A box in the bay's own frame: u along the wall, v in world Y, and d out from the flat
+// face into the room. Returns a world-space AABB, which is all the collider needs too.
+function bayBox(bay, u0, u1, v0, v1, d0, d1) {
+  const min = new THREE.Vector3(Infinity, Math.min(v0, v1), Infinity);
+  const max = new THREE.Vector3(-Infinity, Math.max(v0, v1), -Infinity);
+  for (const u of [u0, u1]) {
+    for (const d of [d0, d1]) {
+      _bp.copy(bay.centre)
+        .addScaledVector(bay.tangent, u)
+        .addScaledVector(bay.normal, bay.faceInset + d);
+      min.x = Math.min(min.x, _bp.x);
+      max.x = Math.max(max.x, _bp.x);
+      min.z = Math.min(min.z, _bp.z);
+      max.z = Math.max(max.z, _bp.z);
+    }
+  }
+  return { min, max };
+}
+
+// The carved parts of the bay: a base course where the field meets the floor, a pier at
+// either end, the shelf the comb sits on and a lintel across the top. They are boxes, so
+// they are colliders for free; they are also what stops a 60 x 20 flat face reading as a
+// grey plane, because every one of them throws its own edge under the raking lamp.
+function bayFurniture(bay) {
+  const uJ = bay.halfWidth - BUILD_BAY.jambWidth * 0.5;
+  return [
+    // jambs — the piers that close the field, from below the floor line up to the lintel
+    bayBox(bay, -bay.halfWidth, -uJ, bay.vBot, bay.vTop, -0.2, BUILD_BAY.jambOut),
+    bayBox(bay, uJ, bay.halfWidth, bay.vBot, bay.vTop, -0.2, BUILD_BAY.jambOut),
+    // the shelf
+    bayBox(bay, -bay.halfWidth + BUILD_BAY.shelfInset, bay.halfWidth - BUILD_BAY.shelfInset,
+      bay.shelfBottom, bay.shelfTop, -0.2, BUILD_BAY.shelfOut),
+    // cornice
+    bayBox(bay, -bay.halfWidth, bay.halfWidth, bay.vTop, bay.vTop + BUILD_BAY.corniceHeight,
+      -0.2, BUILD_BAY.corniceOut),
+  ];
+}
+
+// The flat field itself, plus its furniture, in one vertex-coloured mesh. It is built with
+// the same vert() the procedural hall uses, so it inherits the hall's luminance falloff
+// and the build wall's warm tint and lands as low-poly hand-made stone, not as a plane.
+function buildBayMesh(spec, bay, template) {
+  const buf = newBuf();
+  const t = bay.tangent;
+  const n = bay.normal;
+  const o = new THREE.Vector3().copy(bay.centre)
+    .addScaledVector(t, -bay.halfWidth)
+    .addScaledVector(n, bay.faceInset);
+  addGrid(
+    buf, spec,
+    o.x, bay.vBot, o.z,
+    t.x, 0, t.z,
+    0, 1, 0,
+    bay.halfWidth * 2, bay.vTop + BUILD_BAY.corniceHeight - bay.vBot,
+    BUILD_BAY.cols, BUILD_BAY.rows,
+    n.x, 0, n.z,
+    INTERIOR.colors.wall, null
+  );
+  // Grain. The field's GEOMETRY has to stay dead flat or the comb stops being flush, so
+  // the variety that keeps it from reading as a painted plane goes into the vertex colour
+  // instead: a cheap two-octave hash of the world position, a few per cent either way.
+  for (let i = 0; i < buf.col.length; i += 3) {
+    const x = buf.pos[i];
+    const y = buf.pos[i + 1];
+    const z = buf.pos[i + 2];
+    const s = BUILD_BAY.mottleScale;
+    const a = Math.sin(x * s * 1.7 + y * s * 0.9 + z * s * 1.3) * 0.6
+      + Math.sin(x * s * 0.41 - y * s * 0.63 + z * s * 0.29) * 0.4;
+    const k = 1 + a * BUILD_BAY.mottle;
+    buf.col[i] *= k;
+    buf.col[i + 1] *= k;
+    buf.col[i + 2] *= k;
+  }
+  for (const b of bayFurniture(bay)) addBox(buf, spec, b.min, b.max, INTERIOR.colors.ledge);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(buf.pos, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(buf.nrm, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(buf.col, 3));
+  geometry.setIndex(buf.idx);
+  geometry.computeBoundingSphere();
+
+  let material;
+  if (template && template.clone) {
+    // Same rock as the rest of the hall — same roughness, fog and tone mapping — so the
+    // bay does not read as a different material stuck on the wall.
+    material = template.clone();
+    material.vertexColors = true;
+    material.flatShading = true;
+    if (material.map) material.map = null;
+    material.needsUpdate = true;
+  } else {
+    material = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, dithering: true });
+  }
+  // The bay is exactly coplanar with the flattened shell behind it, over a ~44 x 20 m panel.
+  // It does not z-fight on this machine, but only because the draw order happens to favour it —
+  // on another GPU that is a coin toss, and this game is played on two other machines. Pull the
+  // bay a hair toward the camera in depth and draw it after the shell so the tie cannot happen.
+  material.polygonOffset = true;
+  material.polygonOffsetFactor = -1;
+  material.polygonOffsetUnits = -1;
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = 'hollow_build_bay';
+  mesh.renderOrder = 1;
+  mesh.frustumCulled = false;
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  return mesh;
+}
+
 // A soft mask for a light shaft: bright at the source, gone by the far end, and — the
 // part that matters — zero at BOTH rims across the beam, so the plane has no silhouette.
 let _shaftTexture = null;
@@ -1103,56 +1558,116 @@ function box(minX, minY, minZ, maxX, maxY, maxZ) {
   };
 }
 
+// The aperture, as a rectangle in the two axes tangential to the entrance wall. Anything
+// pushed here is split around it, or the queen cannot get in.
+function carve(list, b, hole) {
+  if (!hole) {
+    list.push(b);
+    return;
+  }
+  const a0 = hole.axis === 'x' ? b.min.x : b.min.z;
+  const a1 = hole.axis === 'x' ? b.max.x : b.max.z;
+  const overlaps = a1 > hole.a0 && a0 < hole.a1 && b.max.y > hole.v0 && b.min.y < hole.v1;
+  if (!overlaps) {
+    list.push(b);
+    return;
+  }
+  const setA = (v, lo, hi) => (hole.axis === 'x'
+    ? box(lo, v.min.y, v.min.z, hi, v.max.y, v.max.z)
+    : box(v.min.x, v.min.y, lo, v.max.x, v.max.y, hi));
+  const pieces = [];
+  if (a0 < hole.a0) pieces.push(setA(b, a0, Math.min(a1, hole.a0)));
+  if (a1 > hole.a1) pieces.push(setA(b, Math.max(a0, hole.a1), a1));
+  const mid = setA(b, Math.max(a0, hole.a0), Math.min(a1, hole.a1));
+  if (b.min.y < hole.v0) pieces.push(box(mid.min.x, b.min.y, mid.min.z, mid.max.x, hole.v0, mid.max.z));
+  if (b.max.y > hole.v1) pieces.push(box(mid.min.x, hole.v1, mid.min.z, mid.max.x, b.max.y, mid.max.z));
+  for (const piece of pieces) {
+    if (piece.max.x - piece.min.x > 0.02 && piece.max.y - piece.min.y > 0.02 && piece.max.z - piece.min.z > 0.02) {
+      list.push(piece);
+    }
+  }
+}
+
+// One slab per measured tile, each running from the hall's bounding box in to the stone
+// that tile actually has. The union is closed: adjacent slabs share a face, so there is
+// no seam, and every slab is at least wallThickness deep so nothing tunnels through.
 function buildShellColliders(spec, ledges) {
   const t = INTERIOR.wallThickness;
   const list = [];
-  // The visible surface, not the bounding box — otherwise the queen flies three units
-  // into rock before anything stops her.
   const c = spec.cavity || spec;
-  const x0 = c.minX - t;
-  const x1 = c.maxX + t;
-  const z0 = c.minZ - t;
-  const z1 = c.maxZ + t;
-  const y0 = c.floorY - t;
-  const y1 = c.ceilY + t;
-
-  list.push(box(x0, y0, z0, x1, c.floorY, z1));
-  list.push(box(x0, c.ceilY, z0, x1, y1, z1));
+  const tiles = spec.tiles;
+  const spanX = Math.max(1e-3, spec.maxX - spec.minX);
+  const spanZ = Math.max(1e-3, spec.maxZ - spec.minZ);
+  const spanY = Math.max(1e-3, spec.ceilY - spec.floorY);
 
   const g = spec.entranceRadius;
   const p = spec.entrancePos;
   const onZ = spec.entranceAxisZ;
+  const entranceKey = onZ ? (spec.entranceSign > 0 ? 'maxZ' : 'minZ') : (spec.entranceSign > 0 ? 'maxX' : 'minX');
+  const hole = {
+    axis: onZ ? 'x' : 'z',
+    a0: (onZ ? p.x : p.z) - g,
+    a1: (onZ ? p.x : p.z) + g,
+    v0: p.y - g,
+    v1: p.y + g,
+  };
 
-  function wallZ(zInner, zOuter, holed) {
-    const zi = Math.min(zInner, zOuter);
-    const za = Math.max(zInner, zOuter);
-    if (!holed) {
-      list.push(box(x0, y0, zi, x1, y1, za));
-      return;
+  function face(key, fallbackPlane) {
+    const f = tiles && tiles.faces ? tiles.faces[key] : null;
+    const nu = f ? f.nu : 1;
+    const nv = f ? f.nv : 1;
+    const axis = key === 'minX' || key === 'maxX' ? 'x' : (key === 'floorY' || key === 'ceilY' ? 'y' : 'z');
+    const roomward = key === 'minX' || key === 'minZ' || key === 'floorY' ? 1 : -1;
+    const holed = key === entranceKey ? hole : null;
+    for (let iu = 0; iu < nu; iu++) {
+      for (let iv = 0; iv < nv; iv++) {
+        const plane = f ? f.planes[iu * nv + iv] : fallbackPlane;
+        // Tangential extents of this tile, in world units.
+        let u0;
+        let u1;
+        let v0;
+        let v1;
+        if (axis === 'x') {
+          u0 = spec.minZ + (iu / nu) * spanZ; u1 = spec.minZ + ((iu + 1) / nu) * spanZ;
+          v0 = spec.floorY + (iv / nv) * spanY; v1 = spec.floorY + ((iv + 1) / nv) * spanY;
+        } else if (axis === 'z') {
+          u0 = spec.minX + (iu / nu) * spanX; u1 = spec.minX + ((iu + 1) / nu) * spanX;
+          v0 = spec.floorY + (iv / nv) * spanY; v1 = spec.floorY + ((iv + 1) / nv) * spanY;
+        } else {
+          u0 = spec.minX + (iu / nu) * spanX; u1 = spec.minX + ((iu + 1) / nu) * spanX;
+          v0 = spec.minZ + (iv / nv) * spanZ; v1 = spec.minZ + ((iv + 1) / nv) * spanZ;
+        }
+        // Grow the outer edges past the hall box so the corners are always sealed.
+        if (iu === 0) u0 -= t;
+        if (iu === nu - 1) u1 += t;
+        if (iv === 0) v0 -= t;
+        if (iv === nv - 1) v1 += t;
+
+        let b;
+        if (axis === 'x') {
+          b = roomward > 0
+            ? box(spec.minX - t, v0, u0, plane, v1, u1)
+            : box(plane, v0, u0, spec.maxX + t, v1, u1);
+        } else if (axis === 'z') {
+          b = roomward > 0
+            ? box(u0, v0, spec.minZ - t, u1, v1, plane)
+            : box(u0, v0, plane, u1, v1, spec.maxZ + t);
+        } else {
+          b = roomward > 0
+            ? box(u0, spec.floorY - t, v0, u1, plane, v1)
+            : box(u0, plane, v0, u1, spec.ceilY + t, v1);
+        }
+        carve(list, b, holed);
+      }
     }
-    list.push(box(x0, y0, zi, p.x - g, y1, za));
-    list.push(box(p.x + g, y0, zi, x1, y1, za));
-    list.push(box(p.x - g, y0, zi, p.x + g, p.y - g, za));
-    list.push(box(p.x - g, p.y + g, zi, p.x + g, y1, za));
   }
 
-  function wallX(xInner, xOuter, holed) {
-    const xi = Math.min(xInner, xOuter);
-    const xa = Math.max(xInner, xOuter);
-    if (!holed) {
-      list.push(box(xi, y0, z0, xa, y1, z1));
-      return;
-    }
-    list.push(box(xi, y0, z0, xa, y1, p.z - g));
-    list.push(box(xi, y0, p.z + g, xa, y1, z1));
-    list.push(box(xi, y0, p.z - g, xa, p.y - g, p.z + g));
-    list.push(box(xi, p.y + g, p.z - g, xa, y1, p.z + g));
-  }
-
-  wallZ(c.maxZ, z1, onZ && spec.entranceSign > 0);
-  wallZ(z0, c.minZ, onZ && spec.entranceSign < 0);
-  wallX(c.maxX, x1, !onZ && spec.entranceSign > 0);
-  wallX(x0, c.minX, !onZ && spec.entranceSign < 0);
+  face('minX', c.minX);
+  face('maxX', c.maxX);
+  face('minZ', c.minZ);
+  face('maxZ', c.maxZ);
+  face('floorY', c.floorY);
+  face('ceilY', c.ceilY);
 
   for (const b of ledges) list.push({ min: b.min.clone(), max: b.max.clone() });
   return list;
@@ -1215,8 +1730,49 @@ export function createInterior(scene, hive, assets, terrain) {
   if (authored) {
     spec.cavity = measureCavity(shell, spec);
     spec.buildWall = buildWallInfo(spec);
-    tintBuildWall(shell, spec);
   }
+
+  // The lattice lives on the visible surface, so its perimeter is the cavity's, and the
+  // entrance's distance along that perimeter has to be re-measured in the same space.
+  // It is built HERE, before the stone is touched, because the bay's shelf has to land on
+  // a lattice row boundary — a shelf that cuts a row of cells in half is not a shelf.
+  const cav = spec.cavity;
+  const cavWalls = [cav.maxX - cav.minX, cav.maxZ - cav.minZ, cav.maxX - cav.minX, cav.maxZ - cav.minZ];
+  const cavStarts = [0, cavWalls[0], cavWalls[0] + cavWalls[1], cavWalls[0] + cavWalls[1] + cavWalls[2]];
+  const p0 = spec.entrancePos;
+  const entranceS = spec.entranceWall === 0 ? cavStarts[0] + (p0.x - cav.minX)
+    : spec.entranceWall === 1 ? cavStarts[1] + (cav.maxZ - p0.z)
+      : spec.entranceWall === 2 ? cavStarts[2] + (cav.maxX - p0.x)
+        : cavStarts[3] + (p0.z - cav.minZ);
+
+  const grid = createHexGrid({
+    minX: cav.minX,
+    maxX: cav.maxX,
+    minZ: cav.minZ,
+    maxZ: cav.maxZ,
+    floorY: cav.floorY,
+    ceilY: cav.ceilY,
+    entranceWall: spec.entranceWall,
+    entranceS,
+    entranceY: spec.entranceY,
+    entranceRadius: spec.entranceRadius,
+  });
+
+  // Pull the build wall's rock onto the comb's plane and give it its architecture. The
+  // lattice does not move; the stone does.
+  const bay = bayOf(spec, grid);
+  let bayMesh = null;
+  if (bay) {
+    if (authored) flattenBuildWall(shell, spec, bay);
+    let template = null;
+    shell.traverse((child) => {
+      if (!template && child.isMesh && /shell/i.test(child.name || '')) template = child.material;
+    });
+    bayMesh = buildBayMesh(spec, bay, template);
+    group.add(bayMesh);
+    for (const b of bayFurniture(bay)) ledges.push(b);
+  }
+  if (authored) tintBuildWall(shell, spec);
 
   group.add(buildShafts(spec));
   group.add(buildKnotholes(spec, spec.knots));
@@ -1252,6 +1808,9 @@ export function createInterior(scene, hive, assets, terrain) {
   shell.traverse((child) => {
     if (child.isMesh && child.material) clipped.push(child.material);
   });
+  // The bay is the build wall's skin, so it has to clip with the rest of the shell on the
+  // way in — otherwise it hangs in the aperture while everything around it is cut away.
+  if (bayMesh && bayMesh.material) clipped.push(bayMesh.material);
 
   const plugs = [];
   if (hive && hive.group) {
@@ -1265,6 +1824,8 @@ export function createInterior(scene, hive, assets, terrain) {
     });
   }
 
+  // Measured AFTER the bay is carved, so the flat face is what the collider tiles find.
+  spec.tiles = measureCavityTiles(shell, spec, spec.cavity);
   const hallColliders = buildShellColliders(spec, ledges);
   const trunkColliders = buildTrunkColliders(spec);
   let colliderTarget = null;
@@ -1306,30 +1867,6 @@ export function createInterior(scene, hive, assets, terrain) {
     for (const c of add) list.push(c);
   }
 
-  // The lattice lives on the visible surface, so its perimeter is the cavity's, and the
-  // entrance's distance along that perimeter has to be re-measured in the same space.
-  const cav = spec.cavity;
-  const cavWalls = [cav.maxX - cav.minX, cav.maxZ - cav.minZ, cav.maxX - cav.minX, cav.maxZ - cav.minZ];
-  const cavStarts = [0, cavWalls[0], cavWalls[0] + cavWalls[1], cavWalls[0] + cavWalls[1] + cavWalls[2]];
-  const p0 = spec.entrancePos;
-  const entranceS = spec.entranceWall === 0 ? cavStarts[0] + (p0.x - cav.minX)
-    : spec.entranceWall === 1 ? cavStarts[1] + (cav.maxZ - p0.z)
-      : spec.entranceWall === 2 ? cavStarts[2] + (cav.maxX - p0.x)
-        : cavStarts[3] + (p0.z - cav.minZ);
-
-  const grid = createHexGrid({
-    minX: cav.minX,
-    maxX: cav.maxX,
-    minZ: cav.minZ,
-    maxZ: cav.maxZ,
-    floorY: cav.floorY,
-    ceilY: cav.ceilY,
-    entranceWall: spec.entranceWall,
-    entranceS,
-    entranceY: spec.entranceY,
-    entranceRadius: spec.entranceRadius,
-  });
-
   let clipActive = false;
 
   function setClipped(active) {
@@ -1361,10 +1898,21 @@ export function createInterior(scene, hive, assets, terrain) {
         ? Math.abs(camera.position.x - spec.entrancePos.x) < spec.entranceRadius * 2
         : Math.abs(camera.position.z - spec.entrancePos.z) < spec.entranceRadius * 2);
 
+    // Against the LOCAL surface, not the comb-height plane: the hollow narrows toward the
+    // ceiling, and a camera clamped to a box the room does not have ends up inside stone.
     const c = spec.cavity || spec;
-    let tx = Math.min(Math.max(camera.position.x, c.minX + m), c.maxX - m);
-    let ty = Math.min(Math.max(camera.position.y, c.floorY + m), c.ceilY - m);
-    let tz = Math.min(Math.max(camera.position.z, c.minZ + m), c.maxZ - m);
+    const q = camera.position;
+    const t = spec.tiles;
+    const lo = (key, a, b, flat) => (t && t.measured ? tilePlaneAt(t, c, spec, key, a, b) : flat);
+    const between = (value, a, b) => {
+      const near = a + m;
+      const far = b - m;
+      if (far <= near) return (a + b) * 0.5;
+      return Math.min(Math.max(value, near), far);
+    };
+    let tx = between(q.x, lo('minX', q.z, q.y, c.minX), lo('maxX', q.z, q.y, c.maxX));
+    let ty = between(q.y, lo('floorY', q.x, q.z, c.floorY), lo('ceilY', q.x, q.z, c.ceilY));
+    let tz = between(q.z, lo('minZ', q.x, q.y, c.minZ), lo('maxZ', q.x, q.y, c.maxZ));
     if (inAperture) {
       if (spec.entranceAxisZ) tz = camera.position.z;
       else tx = camera.position.x;

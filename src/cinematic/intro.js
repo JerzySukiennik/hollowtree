@@ -1,50 +1,75 @@
-// Hollowtree — the opening cinematic: a queen hatches in the hollow, climbs to the light and takes
-// her first flight into the meadow. Seven authored shots, ~24 s, a pure function of elapsed time
-// from one shared start timestamp so every client in a session sees the identical cut.
+// Hollowtree — the opening cinematic: a queen hatches in the hollow, crosses it to the light,
+// flies out into the meadow, and the world turns around her before the player takes the stick.
+// Nine authored shots, 52 s, a pure function of elapsed time from one shared start timestamp so
+// every client in a session sees the identical cut.
 //
-// Every camera number below is expressed in a frame built from measured, live geometry — never from
-// guessed constants. The frame is:
+// Every camera number below is expressed in a frame built from measured, live geometry — never
+// from guessed constants. Two frames are used:
 //
-//   W       spec.entrancePos      the aperture on the INNER wall of the hall
-//   O       hive.entrance         the aperture mouth on the OUTER bark surface
-//   n       spec.entranceNormal   outward, flattened (0,0,1) for the shipped layout
-//   inward  -n                    into the hall
-//   tan     (n.z, 0, -n.x)        lateral, (1,0,0) for the shipped layout
-//   up      (0,1,0)
+//   the aperture frame          the natal frame
+//   W    spec.entrancePos       N     the natal cell centre, from the live comb lattice
+//   O    hive.entrance          M     N + faceOut * (cell depth / 2) — the cell mouth
+//   n    spec.entranceNormal    faceOut  the build wall's inward normal, (0,0,1) as shipped
+//   inward -n                   tan   cross(up, faceOut), (1,0,0) as shipped
+//   tan  (n.z, 0, -n.x)         up    (0,1,0)
 //
-// WHY THE INTERIOR SET MOVED (2026-08-08)
-// --------------------------------------
-// The previous staging trusted `spec` as if the hall were a hollow box: spec reports
-// x[-48,48] y[3.20,66.84] z[-89.40,-25.40], so a natal cell hung 14 m lateral of the aperture,
-// just off the z = -25.40 plane, looked safely inside. It was not. `spec` is the hall's *bounding*
-// volume; the drawn shell, its landing slab, four tiers of gallery ledges, the alcoves and the
-// floor-to-ceiling pillars all live inside that box, and near the entrance wall they fill it
-// almost completely. Measured with measureClearance() below, the old path put 377 of 2401 camera
-// samples within 0.6 m of a solid and touched `hollow_shell` at 0.005 m. A camera sitting *in* a
-// single-sided wall sees straight through it, which is exactly why the first frames of the old
-// opening were flat brown fields — and why the hatch shot showed the comb hanging over open
-// meadow with sky behind it.
+// WHERE SHE HATCHES (2026-08-08, second pass)
+// -------------------------------------------
+// She used to hatch from a free-standing prop — `PLACEHOLDER_comb_cells`, 420 instanced cells
+// parked out in the meadow at (-20, 19, -52) and struck at the cut. It was a lie the player
+// caught: the first thing the opening showed them was a wall of brood that does not exist
+// anywhere in the game, and the place they actually start — the seven-cell flower on the build
+// wall, under the START marker — they had never seen.
 //
-// So the set is no longer placed by assumption. The clearance field was sampled over the whole
-// front half of the hall and the one wide, genuinely empty lane is:
+// The prop is gone. The natal cell is now a REAL cell of the hive's starting comb, read live from
+// `nest.comb.seedAnchor()` and `nest.grid`: the seed sits at (0.382, 15.623, -84.487) on wall 2
+// and she hatches from the cell directly above-right of it at (0.881, 16.488, -84.487). Nothing
+// is staged there but the wax capping over her cell (which breaks and falls, so it is gone by
+// design), a dark hex standing in for the open cell under it, and the pollen drifting in the build
+// wall's rake light. When the player flies back in twenty minutes later, that cell is still there,
+// with six of its neighbours, and it is where they place their first comb.
 //
-//   x ∈ [-26, -16]   y ∈ [14, 29]   z ∈ [-38, -58]      4.7 m to 12.1 m clear throughout
+// Nothing in this file hard-codes those coordinates: seedAnchor() and grid.cellCenter() are read
+// at play() time, the wall normal is derived from the lattice (layer 1 minus layer 0), and the
+// natal cell is chosen as the neighbour with the greatest lift so the pick is stable. The numbers
+// above are what the shipped layout reports; the hall volume is rebuilt from the loaded GLB, so
+// the seed's z has been observed at both -84.487 and -85.330 across loads. Use natalReport().
 //
-// The natal comb now sits at the far end of that lane, at (-20, 19, -52), and every interior
-// camera works from inside it. That spot was not chosen only for the clearance: the hall's own
-// skylight sits at (-21.12, -49.08) directly above it, so the comb face has a motivated key light
-// and the pollen motes have a real shaft to drift in.
+// That change costs the old "she is one cell of thousands" beat — there are seven cells, not
+// thousands — and replaces it with a truer one: the crane in `reveal` pulls back off a comb the
+// size of a dinner plate until it is a speck on a 96 x 63 m empty wall. The hollow is empty
+// because the player has not built it yet.
 //
-// Reference numbers for the rest of the layout:
-//   hive group          (0, 0.00, -30)          terrain is flat (y≈0) for 60 m around the trunk
-//   W                   (0, 16.00, -25.403)     O = (0, 16.00, -22.203)
-//   trunk bbox          x[-21.0, 22.4]  y[0, 66.1]  z[-50.4, -11.1]
-//   canopy leaf bbox    x[-28.8, 31.5]  y[37.1, 74.0]  z[-57.0, -9.6]
-//   skylights           (-21.12, -49.08) and (21.12, -65.72), in the ceiling at y 66.8
+// The gameplay START sprite stays suppressed while mode === 'cinematic' (comb.js already does
+// this). It is a wayfinding marker for play, and a floating UI word is the one thing that would
+// make these frames read as a tutorial instead of a film. It reappears on the same cell the
+// instant play starts, which is now a callback rather than a first sighting.
+//
+// THE TIME-LAPSE (shot 8)
+// -----------------------
+// The opening was 24 s and read as a cut to gameplay. Shot 8 is 12.4 s of held wide on the tree
+// in which the world's own clock is run fast: `sky.setTimeOfDay` is driven through exactly two
+// whole days (so the offset is 0 mod 1 at the end and the hand-back is bit-exact), and the real
+// weather schedule is re-based onto a 3 s phase so its authored chain — clear, overcast, storm,
+// wind, rain — plays out in one shot with the system's own transitions. Nothing is faked: the
+// sun really moves, the shadow cascade really sweeps, the rain is `weather.js` rain and the wind
+// is bending the same grass the player will fly over. Both systems are put back exactly as they
+// were; see driveSky/driveWeather.
+//
+// Reference numbers for the layout:
+//   hall               x[-48,48]  y[3.20,66.84]  z[-89.40,-25.40]   (bounding volume)
+//   build wall         comb cells at z ~ -84.49, cell mouths 0.24 m proud of that, wall skin
+//                      0.12 m behind them; the cell pitch is 1.00 m across flats
+//   W                  (0, 16.00, -25.403)      O = (0, 16.00, -22.203)
+//   hive group         (0, 0.00, -30)           terrain flat (y≈0) for 60 m around the trunk
+//   trunk bbox         x[-21.0, 22.4]  y[0, 66.1]  z[-50.4, -11.1]
+//   canopy leaf bbox   x[-28.8, 31.5]  y[37.1, 74.0]  z[-57.0, -9.6]
 //
 // Interior shots run with the trunk hidden (applyEnv); exterior shots run with it visible and are
 // kept far outside the bark and below the leaf mass. Do not move a camera point in this file
-// without re-running measureClearance() — that is what it is for.
+// without re-running measureClearance() — that is what it is for. The macro shots are necessarily
+// closer to a wall than the old prop staging was, because the subject is a 1 m cell on that wall
+// and not a 21 m slab hanging in mid-air; the floor is 3 m and it is measured, not assumed.
 
 import * as THREE from 'three';
 import { CINEMATIC, INTRO, HIVE, INTERIOR, PALETTE, SKY, WORLD } from '../config.js';
@@ -64,62 +89,72 @@ const _fog = new THREE.Color();
 // The sequence. Times are absolute seconds from the shared start timestamp.
 // ---------------------------------------------------------------------------
 
-const DURATION = 24.0;
+const DURATION = 52.0;
 
-// Seven beats. The cut at `burst` is load-bearing: FLASHES fires a bloom on exactly that frame to
+// Nine beats. The cut at `burst` is load-bearing: FLASHES fires a bloom on exactly that frame to
 // mask the swap from interior shell to world, so its `at` must not move without moving the flash.
 const SHOTS = [
-  // id        at     dur   ease        fov         handheld  shake
-  { id: 'hatch', at: 0.0, dur: 4.2, ease: 'holdOut', fov: [38, 31], handheld: 0.24, shake: 0.0 },
-  { id: 'emerge', at: 4.2, dur: 3.8, ease: 'out', fov: [44, 37], handheld: 0.40, shake: 0.07 },
-  { id: 'reveal', at: 8.0, dur: 4.4, ease: 'settle', fov: [40, 52], handheld: 0.18, shake: 0.0 },
-  // launch tightens rather than widens: its subject is flying away from a locked-off camera, and
-  // the old 50 -> 66 shrank a queen who was already receding until she was a speck on a dark wall.
-  { id: 'launch', at: 12.4, dur: 3.0, ease: 'in', fov: [58, 42], handheld: 0.34, shake: 0.15 },
-  { id: 'burst', at: 15.4, dur: 2.8, ease: 'out', fov: [52, 47], handheld: 0.42, shake: 0.18 },
-  { id: 'wide', at: 18.2, dur: 2.8, ease: 'settle', fov: [56, 48], handheld: 0.16, shake: 0.0 },
-  { id: 'settle', at: 21.0, dur: 3.0, ease: 'settle', fov: [66, 62], handheld: 0.14, shake: 0.0 },
+  // id        at      dur    ease        fov         handheld  shake
+  { id: 'hatch', at: 0.0, dur: 6.6, ease: 'smooth', fov: [30, 23], handheld: 0.20, shake: 0.0 },
+  { id: 'emerge', at: 6.6, dur: 5.4, ease: 'out', fov: [34, 27], handheld: 0.34, shake: 0.05 },
+  { id: 'reveal', at: 12.0, dur: 6.2, ease: 'inOut', fov: [38, 62], handheld: 0.16, shake: 0.0 },
+  { id: 'hall', at: 18.2, dur: 5.0, ease: 'inOut', fov: [50, 34], handheld: 0.20, shake: 0.0 },
+  { id: 'launch', at: 23.2, dur: 4.4, ease: 'in', fov: [46, 28], handheld: 0.30, shake: 0.12 },
+  { id: 'burst', at: 27.6, dur: 3.2, ease: 'out', fov: [52, 47], handheld: 0.42, shake: 0.18 },
+  { id: 'wide', at: 30.8, dur: 4.2, ease: 'settle', fov: [56, 48], handheld: 0.16, shake: 0.0 },
+  // The passage-of-time beat. Held wide, almost locked off — the drift is 7 m over 12.4 s — so the
+  // only thing moving in frame is the world: sun, shadow, cloud colour, rain, wind in the grass.
+  { id: 'lapse', at: 35.0, dur: 12.4, ease: 'inOut', fov: [46, 44], handheld: 0.05, shake: 0.0 },
+  { id: 'settle', at: 47.4, dur: 4.6, ease: 'settle', fov: [66, 62], handheld: 0.12, shake: 0.0 },
 ];
 
 const T = {};
 for (const s of SHOTS) T[s.id] = s;
 
 const CARDS = [
-  { at: 8.6, dur: 3.4, fade: 0.95, text: 'title', size: 1.0 },
-  { at: 18.9, dur: 2.1, fade: 0.75, text: 'subtitle', size: 0.36 },
+  { at: 12.6, dur: 4.0, fade: 1.0, text: 'title', size: 1.0 },
+  { at: 43.2, dur: 3.0, fade: 0.9, text: 'subtitle', size: 0.36 },
 ];
 
 // One bloom on the cut from the hollow into daylight — it also masks the frame where the interior
 // shell is swapped for the world.
-const FLASHES = [{ at: 15.4, dur: 0.55, peak: 0.9, color: '#fff4dd' }];
+const FLASHES = [{ at: 27.6, dur: 0.55, peak: 0.9, color: '#fff4dd' }];
 
-// Staging constants, all in metres in the frame described at the top of the file.
-// cellLateral / cellLift / cellDepth put the comb at world (-20, 19, -52): the centre of the one
-// measured lane in the hall that is clear on every side, and directly under the (-21.12, -49.08)
-// skylight. The comb face looks back at the aperture (+n), so every interior camera stands between
-// the comb and the daylight and is lit from behind.
+// Staging constants, in metres, in the frames described at the top of the file.
 const STAGE = {
-  cellLateral: -20.0, // tan offset of the natal comb from the aperture  → world x = -20
-  cellLift: 3.0, //      up offset                                       → world y = 19
-  cellDepth: 26.6, //    inward from the aperture wall                   → world z = -52.0
-  perchOut: 2.8, //      out along +n from the cell mouth to the perch lip
-  perchDrop: -1.6,
-  // 420 cells, 21.5 m wide x 19.5 m tall — exactly INTRO.combMax. The old 15x9 patch was 16 x 8 m,
-  // which the reveal crane cleared entirely: the comb read as a rectangular slab hanging in mid-air
-  // with all four cut edges in shot. Squarer and half again as tall, it runs past every frame edge
-  // of every interior shot (the widest is 18.0 x 10.1 m of comb at the end of the reveal crane), so
-  // it reads as what it is meant to be — a wall of brood she is one cell of.
-  combCols: 20,
-  combRows: 21,
-  capBreakAt: 3.1,
-  capFall: 1.6,
-  capTrembleFrom: 1.0,
-  emergeEnd: 6.4, // queen is fully out of the cell
-  hoverDrift: 0.9,
-  // queen exit arc, shared by burst/wide/settle
+  perchOut: 1.9, //   out along faceOut from the cell mouth to where she rests
+  perchDrop: -0.75,
+  capBreakAt: 4.7,
+  capFall: 2.0,
+  capTrembleFrom: 2.2,
+  emergeEnd: 10.2, // queen is fully out of the cell
+  liftAt: 18.4, //    she leaves the comb and starts the long crossing
+  emergeOut: 1.0,
+  hoverDrift: 0.35,
+  // queen exit arc, shared by burst/wide, landing before the time-lapse
+  exitEnd: 35.0,
   restLateral: 3.0,
   restOut: 17.2,
   restDrop: -6.0,
+};
+
+// The time-lapse. Both systems are the game's own; both are handed back.
+const LAPSE = {
+  // sky: exactly `days` whole days, eased in and out, so the offset is 0 mod 1 at skyTo and the
+  // sky lands back on the true world time to the millisecond.
+  skyFrom: 35.8,
+  skyTo: 46.6,
+  days: 2,
+  // weather: re-base the real schedule onto a fast phase. Seed 45's authored chain from index 0 is
+  // clear → overcast → storm → wind → rain → clear, which is the arc this shot wants and which
+  // ends calm, so the handoff shot is not played in a downpour.
+  wxOn: 35.2,
+  wxSeed: 45,
+  wxPhaseMs: 3000,
+  wxTransitionMs: 1700,
+  // Put the real schedule back under the closing fade-to-black (which runs from 50.4 to 52.0), so
+  // the one frame where the chain jumps back to true world time is at ~94% black.
+  wxOff: 51.6,
 };
 
 function hash(i, salt) {
@@ -202,33 +237,6 @@ function PLACEHOLDER_beeGeometry(length, body, dark, wing) {
   return geo;
 }
 
-function PLACEHOLDER_combGeometry() {
-  const buf = newBuf();
-  const r = INTRO.combCellRadius;
-  const d = INTRO.combCellDepth;
-  const tube = new THREE.CylinderGeometry(r, r * 0.94, d, 6, 1, true);
-  tube.rotateX(Math.PI * 0.5);
-  const cap = new THREE.CircleGeometry(r * 0.94, 6);
-
-  _m.identity();
-  appendGeo(buf, tube, _m, new THREE.Color(0xffffff));
-  _m.makeTranslation(0, 0, -d * 0.5 + 0.02);
-  appendGeo(buf, cap, _m, new THREE.Color(0x5a5a5a));
-
-  const col = buf.col;
-  const pos = buf.pos;
-  for (let i = 0; i < pos.length / 3; i++) {
-    const z = pos[i * 3 + 2];
-    const k = 0.24 + 0.76 * smoothstep(-d * 0.5, d * 0.5, z);
-    col[i * 3] *= k;
-    col[i * 3 + 1] *= k;
-    col[i * 3 + 2] *= k;
-  }
-  tube.dispose();
-  cap.dispose();
-  return finishGeo(buf);
-}
-
 let _moteTexture = null;
 function moteSprite() {
   if (_moteTexture) return _moteTexture;
@@ -305,20 +313,43 @@ export function createIntro(context) {
     INTRO.colors.workerDark,
     INTRO.colors.workerWing
   );
-  const combGeo = PLACEHOLDER_combGeometry();
 
   const workers = instanced('PLACEHOLDER_worker_swarm', workerGeo, INTRO.workerMax);
-  const comb = instanced('PLACEHOLDER_comb_cells', combGeo, INTRO.combMax);
-  stage.add(workers, comb);
+  stage.add(workers);
 
-  const capGeo = new THREE.CircleGeometry(INTRO.combCellRadius * 0.98, 6);
+  // The only thing this cinematic adds to the build wall: the wax capping over the one cell she is
+  // in. It is a hexagon the size of a real cell face, it breaks at STAGE.capBreakAt and falls, and
+  // it is gone from the frame long before the cut — a capping that has been hatched out of is
+  // supposed to be gone, so nothing here survives into play.
+  const capGeo = new THREE.CircleGeometry(0.5, 6);
+  capGeo.rotateZ(Math.PI * 0.5); // pointy-top, matching hexCellGeometry's cell mouths
   const cap = new THREE.Mesh(
     capGeo,
-    new THREE.MeshLambertMaterial({ color: INTRO.colors.cap, flatShading: true, side: THREE.DoubleSide })
+    new THREE.MeshLambertMaterial({
+      color: 0xf6dfab,
+      emissive: 0x4a3312,
+      flatShading: true,
+      side: THREE.DoubleSide,
+    })
   );
-  cap.name = 'PLACEHOLDER_natal_cap';
+  cap.name = 'cinematic_natal_cap';
   cap.visible = false;
   stage.add(cap);
+
+  // The hive's cells are closed hex prisms — a sealed plug, not an open tube — so with nothing but
+  // a capping on top there is no visual difference between a cell she can hatch out of and its six
+  // neighbours, and once the capping falls she would push out of solid wax. This is the opening of
+  // her cell: a dark hex face a few centimetres proud of the real one, under the capping, revealed
+  // when it breaks. It is 0.9 m across, it lives in the cinematic stage, and it goes with it.
+  const mouthGeo = new THREE.CircleGeometry(0.47, 6);
+  mouthGeo.rotateZ(Math.PI * 0.5);
+  const mouth = new THREE.Mesh(
+    mouthGeo,
+    new THREE.MeshBasicMaterial({ color: 0x2a1a0b, side: THREE.DoubleSide, toneMapped: true })
+  );
+  mouth.name = 'cinematic_natal_mouth';
+  mouth.visible = false;
+  stage.add(mouth);
 
   const motePos = new Float32Array(INTRO.moteCount * 3);
   const moteGeo = new THREE.BufferGeometry();
@@ -327,7 +358,7 @@ export function createIntro(context) {
     moteGeo,
     new THREE.PointsMaterial({
       color: INTRO.colors.mote,
-      size: INTRO.moteSize * 2.2,
+      size: INTRO.moteSize * 1.6,
       map: moteSprite(),
       transparent: true,
       opacity: 0.85,
@@ -395,6 +426,124 @@ export function createIntro(context) {
     if (audio && typeof audio.stopMusic === 'function') audio.stopMusic(fade);
   }
 
+  // ------------------------------------------------- world clock and weather ---
+  //
+  // Both of these drive a live game system forward and then hand it back. Neither fakes anything:
+  // there is no time-lapse texture, no second sun, no scripted cloud sprite.
+
+  // main.js recomputes the time of day from the world clock every frame and pushes it into
+  // sky.update() BEFORE the cinematic gets its update, so writing sky.setTimeOfDay() from here
+  // would be overwritten by weather's own light grade on the following frame — weather multiplies
+  // whatever the sky last wrote. Wrapping sky.update instead puts the offset in at the right point
+  // in the frame: main's true time of day goes in, ours comes out, and weather still grades on top
+  // of it. The wrapper is installed for the whole sequence and removed on teardown; outside the
+  // lapse window skyOffsetAt() returns 0, so it is a no-op.
+  let skyPatch = null;
+
+  function skyOffsetAt(t) {
+    if (!(t > LAPSE.skyFrom)) return 0;
+    if (t >= LAPSE.skyTo) return 0; // LAPSE.days is a whole number of days: 0 mod 1
+    const u = smoothstep(LAPSE.skyFrom, LAPSE.skyTo, t);
+    return (LAPSE.days * u) % 1;
+  }
+
+  function patchSky() {
+    const sky = ctx.sky;
+    if (skyPatch || !sky || typeof sky.update !== 'function') return;
+    const original = sky.update;
+    skyPatch = { sky, original };
+    sky.update = function patched(dt, timeOfDay, target) {
+      if (typeof timeOfDay === 'number' && director.active) {
+        const shifted = (timeOfDay + skyOffsetAt(director.time)) % 1;
+        return original.call(sky, dt, shifted, target);
+      }
+      return original.call(sky, dt, timeOfDay, target);
+    };
+  }
+
+  function unpatchSky() {
+    if (!skyPatch) return;
+    skyPatch.sky.update = skyPatch.original;
+    skyPatch = null;
+  }
+
+  // The weather schedule is a pure function of (seed, startedAt, durationMs, transitionMs) and the
+  // world clock, so accelerating it is a matter of re-basing those four numbers and putting them
+  // back. setFromWorld() is the module's own entry point for exactly this — it cross-fades from
+  // the look on screen into the new schedule rather than cutting — and it is what a multiplayer
+  // session already uses to push the host's weather at every client.
+  let wxSaved = null;
+
+  function driveWeather(t) {
+    const weather = ctx.weather;
+    if (!weather || typeof weather.setFromWorld !== 'function' || !weather.schedule) return;
+    if (!wxSaved && t >= LAPSE.wxOn && t < LAPSE.wxOff) {
+      const s = weather.schedule;
+      wxSaved = {
+        seed: s.seed,
+        startedAt: s.startedAt,
+        durationMs: s.durationMs,
+        transitionMs: s.transitionMs,
+        kind: s.kind,
+        intensity: s.intensity,
+      };
+      weather.setFromWorld({
+        seed: LAPSE.wxSeed,
+        startedAt: Date.now(),
+        durationMs: LAPSE.wxPhaseMs,
+        transitionMs: LAPSE.wxTransitionMs,
+        kind: s.kind,
+        intensity: s.intensity,
+      });
+    } else if (wxSaved && t >= LAPSE.wxOff) {
+      restoreWeather();
+    }
+  }
+
+  // Exact restore: the same six numbers back, through the same door they went out of. The look on
+  // screen then eases from the last fast phase into the true one over the schedule's own
+  // transitionMs — a normal 150 s weather change, i.e. the thing the game does anyway — and
+  // weather.sample() is bit-identical to the untouched chain from the first frame after this call.
+  function restoreWeather() {
+    const weather = ctx.weather;
+    if (!wxSaved) return;
+    const saved = wxSaved;
+    wxSaved = null;
+    if (weather && typeof weather.setFromWorld === 'function') weather.setFromWorld(saved);
+  }
+
+  // ------------------------------------------------------------ start marker ---
+  //
+  // comb.js already intends the START sprite to be suppressed during the opening — it tests
+  // `host.mode === 'cinematic'` — but that test lives in comb.update(), and main.js only calls
+  // comb.update() from the fixed step when mode === 'play'. So during the cinematic the check
+  // never runs and the sprite keeps whatever visibility it was built with, which is on. It did not
+  // matter while the opening was staged 60 m away in the meadow; now that the shot is ON the seed
+  // comb, the word START floats in the middle of the reveal. Hidden here, restored on teardown.
+  //
+  // And it should be hidden: the marker is play-mode wayfinding, and a floating UI word in these
+  // frames would make the opening read as a tutorial. The player meets the cell first as a place,
+  // then finds it labelled the moment they have the stick — a callback rather than a caption.
+  let startLabel = null;
+  let startLabelWas = true;
+
+  function findStartLabel() {
+    if (startLabel) return startLabel;
+    const group = ctx.comb && ctx.comb.group;
+    if (!group) return null;
+    group.traverse((node) => {
+      if (node.name === 'comb_start_label') startLabel = node;
+    });
+    if (startLabel) startLabelWas = startLabel.visible;
+    return startLabel;
+  }
+
+  function setStartMarker(visible) {
+    const label = findStartLabel();
+    if (!label) return;
+    label.visible = visible ? startLabelWas : false;
+  }
+
   // ------------------------------------------------------------- geometry ---
 
   function detailNodes() {
@@ -435,6 +584,51 @@ export function createIntro(context) {
     return out;
   }
 
+  // The natal cell, read from the live hive rather than invented. seedAnchor() is the middle of the
+  // seven-cell starting flower; the cell she hatches from is the neighbour above it, so the seed
+  // and the rest of the flower sit under her in the macro frames and the whole cluster is the thing
+  // the crane in `reveal` pulls away from.
+  function natalCell() {
+    const comb = ctx.comb;
+    const grid = ctx.grid || (comb && comb.grid) || (ctx.interior && ctx.interior.grid) || null;
+    const anchor = comb && typeof comb.seedAnchor === 'function' ? comb.seedAnchor() : null;
+    if (!anchor || !grid || typeof grid.cellCenter !== 'function') return null;
+
+    const seed = anchor.position.clone();
+    // Wall normal, straight from the lattice: layer 1 is one cell-depth further off the wall than
+    // layer 0, so the difference is the inward normal. No hard-coded (0,0,1).
+    const l0 = grid.cellCenter(anchor.col, anchor.row, 0, new THREE.Vector3());
+    const l1 = grid.cellCenter(anchor.col, anchor.row, 1, new THREE.Vector3());
+    const faceOut = l1.clone().sub(l0);
+    if (faceOut.lengthSq() < 1e-8) faceOut.set(0, 0, 1);
+    faceOut.normalize();
+
+    // Pick the neighbour with the greatest lift, tie-broken laterally, so the choice is stable
+    // across runs and lattices instead of depending on neighbour ordering.
+    const list = typeof grid.neighbors === 'function' ? grid.neighbors(anchor.col, anchor.row, 0, []) : [];
+    let best = null;
+    let bestKey = -Infinity;
+    const tanProbe = new THREE.Vector3(0, 1, 0).cross(faceOut).normalize();
+    for (const c of list) {
+      if (c.layer !== 0) continue;
+      const pos = grid.cellCenter(c.col, c.row, c.layer, new THREE.Vector3());
+      if (pos.distanceTo(seed) > grid.cellSize() * 1.6) continue; // stay on this wall
+      const key = (pos.y - seed.y) * 100 + pos.clone().sub(seed).dot(tanProbe);
+      if (key > bestKey) {
+        bestKey = key;
+        best = { cell: c, pos };
+      }
+    }
+    const chosen = best || { cell: anchor, pos: seed.clone() };
+    return {
+      seed,
+      cell: chosen.cell,
+      position: chosen.pos,
+      faceOut,
+      cellSize: typeof grid.cellSize === 'function' ? grid.cellSize() : 1,
+    };
+  }
+
   function buildAnchors() {
     const spec = (ctx.interior && ctx.interior.spec) || fallbackSpec(ctx.hive, ctx.terrain);
     const n = new THREE.Vector3().copy(spec.entranceNormal).setY(0).normalize();
@@ -449,24 +643,41 @@ export function createIntro(context) {
       ? ctx.hive.position.clone()
       : new THREE.Vector3(HIVE.x, spec.floorY, HIVE.z);
 
-    // The natal comb, deep in the measured lane. `faceOut` is the direction its cell mouths open:
-    // back toward the aperture, so the camera never has to stand behind the comb in the dark.
-    const cellRoot = p(W, tan, STAGE.cellLateral, up, STAGE.cellLift, inward, STAGE.cellDepth);
-    const faceOut = n.clone();
-    const cellMouth = p(cellRoot, faceOut, INTRO.combCellDepth * 0.5);
+    // The natal cell, live from the comb. The fallback keeps the module standing if the nest failed
+    // to load: the middle of the build wall, which is where the seed would have been.
+    const natal = natalCell();
+    const wall = spec.buildWall;
+    const cellRoot = natal
+      ? natal.position.clone()
+      : wall
+        ? p(wall.centre.clone(), wall.normal, 0.12)
+        : p(W, inward, spec.depth - 1.0, up, 0.0);
+    const faceOut = natal
+      ? natal.faceOut.clone()
+      : wall
+        ? wall.normal.clone().normalize()
+        : n.clone();
+    const seedRoot = natal ? natal.seed.clone() : cellRoot.clone();
+    const cellSize = natal ? natal.cellSize : 1;
+    // Lateral axis of the wall, always well defined and always right-handed with (up, faceOut).
+    const wtan = new THREE.Vector3().crossVectors(up, faceOut).normalize();
+    // Cell prisms are COMB.cellDepth * depthFill deep and centred on cellCenter, so the mouth is
+    // half that proud of the centre. 0.24 m on the shipped lattice.
+    const cellMouth = p(cellRoot, faceOut, 0.24);
     const perch = p(cellMouth, faceOut, STAGE.perchOut, up, STAGE.perchDrop);
 
-    // Bee traffic anchors. hallFocus sits in the same open lane as the set so the orbiting workers
-    // read as depth behind the queen instead of popping through a wall.
-    const streamOut = p(W, inward, 1.2);
-    const streamDeep = p(W, inward, 32.0, tan, -6.0, up, 9.0);
-    const hallFocus = p(W, inward, 24.0, tan, -11.0, up, 6.0);
+    // Bee traffic anchors, in the open middle of the hall between the two walls.
+    const streamOut = p(W, inward, 1.5);
+    const streamDeep = p(W, inward, 44.0, tan, -9.0, up, 10.0);
+    const hallFocus = p(W, inward, 34.0, tan, -15.0, up, 11.0);
 
     // The queen's resting spot in the meadow, and the exact pose the play rig will inherit.
     const rest = p(O, tan, STAGE.restLateral, n, STAGE.restOut, up, STAGE.restDrop);
 
     Object.assign(anchors, {
-      spec, n, inward, tan, up, W, O, hivePos, cellRoot, faceOut, cellMouth, perch,
+      spec, n, inward, tan, up, W, O, hivePos,
+      natalCell: natal ? natal.cell : null,
+      cellRoot, seedRoot, faceOut, wtan, cellSize, cellMouth, perch,
       streamOut, streamDeep, hallFocus, rest,
     });
 
@@ -483,15 +694,17 @@ export function createIntro(context) {
       0.5
     );
 
-    // Perch → aperture, 28 m across the hall. She climbs out of the lane, crosses the open middle
-    // and only converges on the trunk axis in the last two control points, where the aperture bore
-    // in hollow-tree.glb is ~2.7 m clear at y = 16.
+    // Comb → aperture: the full 59 m length of the hollow, which is the crossing the shot pair
+    // `hall` + `launch` covers. She pushes off the wall, climbs into the open middle, and only
+    // converges on the trunk axis in the last two control points, where the aperture bore in
+    // hollow-tree.glb is ~2.7 m clear at y = 16.
     anchors.launchCurve = new THREE.CatmullRomCurve3(
       [
         perch.clone(),
-        p(cellMouth, faceOut, 5.5, tan, 1.2, up, 0.9),
-        p(cellMouth, faceOut, 12.0, tan, 5.0, up, 1.7),
-        p(W, inward, 8.0, tan, -3.0, up, 1.0),
+        p(cellMouth, faceOut, 6.0, wtan, -2.4, up, 2.2),
+        p(cellMouth, faceOut, 17.0, wtan, -5.0, up, 5.0),
+        p(W, inward, 30.0, tan, -4.0, up, 5.0),
+        p(W, inward, 14.0, tan, -1.5, up, 2.0),
         p(W, inward, 2.4, up, 0.2),
         p(W, n, 1.2),
       ],
@@ -512,35 +725,20 @@ export function createIntro(context) {
     return anchors.exitCurve.getPoint(THREE.MathUtils.clamp(u, 0, 1), out || _pathA);
   }
 
-  // Normalised progress along the exit arc, shared by burst/wide/settle so the three shots read as
-  // one continuous flight. Decelerating, and its derivative is zero at u = 1, so she truly stops.
+  // Normalised progress along the exit arc, shared by burst and wide so the two shots read as one
+  // continuous flight. Decelerating, derivative zero at u = 1, so she truly stops before the lapse.
   function exitU(t) {
-    const s = THREE.MathUtils.clamp((t - T.burst.at) / (DURATION - T.burst.at), 0, 1);
+    const s = THREE.MathUtils.clamp((t - T.burst.at) / (STAGE.exitEnd - T.burst.at), 0, 1);
     return 1 - (1 - s) ** 1.8;
   }
 
-  function buildComb() {
-    const { cellRoot, tan, up, faceOut } = anchors;
-    const cols = STAGE.combCols;
-    const rows = STAGE.combRows;
-    let slot = 0;
-    for (let r = 0; r < rows && slot < INTRO.combMax; r++) {
-      for (let c = 0; c < cols && slot < INTRO.combMax; c++) {
-        const x = (c - (cols - 1) * 0.5) * INTRO.combPitch + (r % 2) * INTRO.combPitch * 0.5;
-        const y = (r - (rows - 1) * 0.5) * INTRO.combRowRise;
-        const cell = p(cellRoot, tan, x, up, y);
-        setBee(comb, slot, cell, faceOut, 0, 1);
-        const tone = hash(r * cols + c, 7);
-        _c.copy(new THREE.Color(INTRO.colors.wax))
-          .lerp(new THREE.Color(INTRO.colors.waxDeep), tone * 0.55)
-          .lerp(new THREE.Color(INTRO.colors.waxFresh), Math.max(0, tone - 0.6));
-        comb.setColorAt(slot, _c);
-        slot++;
-      }
-    }
-    comb.count = slot;
-    comb.instanceMatrix.needsUpdate = true;
-    if (comb.instanceColor) comb.instanceColor.needsUpdate = true;
+  // Progress along the crossing of the hollow, shared by `hall` and `launch`.
+  function crossU(t) {
+    // Front-loaded: she shoves off the wall hard and then cruises. A symmetric ease left her still
+    // hugging the comb for most of `hall`, which made that shot a second helping of `reveal`
+    // instead of the establishing shot of the hollow.
+    const s = THREE.MathUtils.clamp((t - STAGE.liftAt) / (T.burst.at - STAGE.liftAt), 0, 1);
+    return s ** 0.72;
   }
 
   // ------------------------------------------------------------- bee crowds ---
@@ -610,15 +808,16 @@ export function createIntro(context) {
 
   // Interior for everything up to the cut at `burst`, world after it. The switch happens under the
   // bloom flash, so the frame where the shell is swapped for the trunk is never visible.
-  // The two macro shots sit 3–7 m off a wax face lit only by a skylight 48 m overhead, which at the
-  // authored hall intensity renders as brown murk before anything resolves. Lift the hall while the
-  // camera is that close and ease back to the authored level by the time `reveal` opens it out, so
-  // the wide shot keeps the deep, unlit corners it needs to read as a cavern.
+  // The macro shots sit 4-8 m off a wax face on the build wall; that wall has its own rake lamp
+  // (interior.js) so the hex relief reads, but at the authored hall intensity a 17-degree lens on
+  // it is still murky. Lift the hall while the camera is that close and ease back to the authored
+  // level by the time `reveal` opens it out, so the wide shots keep the deep, unlit corners they
+  // need to read as a cavern.
   function envAt(t) {
     if (t >= T.burst.at) return { k: 0, gain: 1 };
     const macro = 1 - smoothstep(T.emerge.at, T.reveal.at, t); // the two shots hard against the wax
-    const hall = 1 - smoothstep(T.reveal.at, T.burst.at, t); //   the two that cross the hollow
-    return { k: 1, gain: INTRO.interiorGain * (1 + 0.45 * macro + 0.25 * hall) };
+    const hall = 1 - smoothstep(T.reveal.at, T.launch.at, t); //  the crane that opens it out
+    return { k: 1, gain: INTRO.interiorGain * (1 + 0.15 * macro + 0.62 * hall) };
   }
 
   function applyEnv(k, gain) {
@@ -653,48 +852,57 @@ export function createIntro(context) {
     let workerCount = 0;
     cap.visible = false;
     motes.visible = false;
-    // The interior set is a free-standing prop, so nothing culls it once the cut lands in daylight.
-    // Own that here, on the one path that runs every frame, rather than only in update()'s
-    // `running` branch — a frame that reaches the stage without reaching that branch used to leave
-    // the comb standing in the meadow beside the trunk.
-    const setDressed = t < T.burst.at;
-    if (comb.visible !== setDressed) comb.visible = setDressed;
 
-    // --- the cap on the natal cell: trembles, splits, tumbles away ---
+    // --- her cell stands open once the capping is off, and stays open until we are too far to
+    //     see it. Struck with the rest of the stage at the cut, like everything else here.
+    mouth.visible = t < T.hall.at;
+    if (mouth.visible) {
+      mouth.position.copy(A.cellMouth).addScaledVector(A.faceOut, 0.028);
+      _m.makeBasis(A.wtan, A.up, A.faceOut);
+      mouth.quaternion.setFromRotationMatrix(_m);
+      mouth.scale.setScalar(A.cellSize);
+    }
+
+    // --- the capping on the natal cell: trembles, splits, tumbles away ---
     if (t < STAGE.capBreakAt + STAGE.capFall) {
       cap.visible = true;
-      cap.position.copy(A.cellMouth).addScaledVector(A.faceOut, 0.02);
+      cap.position.copy(A.cellMouth).addScaledVector(A.faceOut, 0.06);
       const tremble = smoothstep(STAGE.capTrembleFrom, STAGE.capBreakAt, t);
       if (t < STAGE.capBreakAt) {
         const wob = Math.sin(t * INTRO.capTrembleFreq * Math.PI * 2) * INTRO.capTremble * tremble;
-        cap.position.addScaledVector(A.faceOut, Math.abs(wob) * 2.2);
-        cap.position.addScaledVector(A.tan, wob);
+        cap.position.addScaledVector(A.faceOut, Math.abs(wob) * 1.4);
+        cap.position.addScaledVector(A.wtan, wob);
       } else {
         const f = (t - STAGE.capBreakAt) / STAGE.capFall;
-        cap.position.addScaledVector(A.faceOut, 0.4 + f * 1.2);
-        cap.position.y -= f * f * 5.0;
+        cap.position.addScaledVector(A.faceOut, 0.25 + f * 0.9);
+        cap.position.y -= f * f * 4.0;
       }
-      cap.lookAt(_v.copy(cap.position).addScaledVector(A.faceOut, 1));
-      cap.rotateZ(t * 1.7);
+      _m.makeBasis(A.wtan, A.up, A.faceOut);
+      cap.quaternion.setFromRotationMatrix(_m);
+      // Aligned with the cell it seals until it breaks — a capping that is already spinning while
+      // it is still on the cell shows the dark mouth through its corners.
+      if (t >= STAGE.capBreakAt) cap.rotateZ((t - STAGE.capBreakAt) * 2.4);
+      cap.scale.setScalar(A.cellSize * 0.99);
     }
 
-    // --- pollen drifting in the shaft of light on the comb face ---
-    if (t < T.launch.at) {
+    // --- pollen drifting in the build wall's rake light, across the comb face ---
+    if (t < T.hall.at) {
       motes.visible = true;
-      const life0 = t * 0.35;
+      const life0 = t * 0.3;
       for (let i = 0; i < INTRO.moteCount; i++) {
         const life = (life0 + hash(i, 53)) % 1;
         const ang = hash(i, 59) * Math.PI * 2;
-        const rad = 4.5 * (0.25 + hash(i, 61));
-        motePos[i * 3] = A.cellMouth.x + Math.cos(ang) * rad + A.faceOut.x * (1 + hash(i, 63) * 4);
-        motePos[i * 3 + 1] = A.cellMouth.y - 3.0 + life * 7.0;
-        motePos[i * 3 + 2] = A.cellMouth.z + Math.sin(ang) * rad + A.faceOut.z * (1 + hash(i, 63) * 4);
+        const rad = 2.2 * (0.25 + hash(i, 61));
+        const out = 0.5 + hash(i, 63) * 3.0;
+        motePos[i * 3] = A.cellMouth.x + A.wtan.x * Math.cos(ang) * rad + A.faceOut.x * out;
+        motePos[i * 3 + 1] = A.cellMouth.y - 1.6 + life * 3.6;
+        motePos[i * 3 + 2] = A.cellMouth.z + A.wtan.z * Math.cos(ang) * rad + A.faceOut.z * out;
       }
       moteGeo.attributes.position.needsUpdate = true;
-      motes.material.opacity = 0.85 * (1 - smoothstep(T.launch.at - 1.0, T.launch.at, t));
+      motes.material.opacity = 0.85 * (1 - smoothstep(T.hall.at - 1.2, T.hall.at, t));
     }
 
-    // --- 4.0 → 6.0 s: she pushes out of the cell ---
+    // --- 6.6 → 10.2 s: she pushes out of the cell ---
     if (t >= T.emerge.at && t < STAGE.emergeEnd) {
       queenVisible = true;
       const u = (t - T.emerge.at) / (STAGE.emergeEnd - T.emerge.at);
@@ -702,40 +910,41 @@ export function createIntro(context) {
       const wobble = Math.sin(t * 5.4) * INTRO.emergeWobble * (1 - e);
       queenState.position
         .copy(A.cellMouth)
-        .addScaledVector(A.faceOut, -0.35 + INTRO.emergeOut * e)
-        .addScaledVector(A.tan, wobble)
-        .addScaledVector(A.up, wobble * 0.6 - e * 0.15);
+        .addScaledVector(A.faceOut, -0.3 + STAGE.emergeOut * e)
+        .addScaledVector(A.wtan, wobble)
+        .addScaledVector(A.up, wobble * 0.6 - e * 0.12);
       faceQueen(A.faceOut, wobble * 1.4, INTRO.queenWingIdle + e * 0.3);
     }
 
-    // --- 6.0 → 12.2 s: she settles onto the perch lip and looks around ---
-    if (t >= STAGE.emergeEnd && t < T.launch.at) {
+    // --- 10.2 → 18.4 s: she settles just off the comb and looks around ---
+    if (t >= STAGE.emergeEnd && t < STAGE.liftAt) {
       queenVisible = true;
-      const span = T.launch.at - STAGE.emergeEnd;
+      const span = STAGE.liftAt - STAGE.emergeEnd;
       const u = (t - STAGE.emergeEnd) / span;
       const e = smoothstep(0, 0.42, u);
-      _v.copy(A.cellMouth).addScaledVector(A.faceOut, INTRO.emergeOut);
+      _v.copy(A.cellMouth).addScaledVector(A.faceOut, STAGE.emergeOut);
       queenState.position.copy(_v).lerp(A.perch, e);
-      queenState.position.addScaledVector(A.tan, Math.sin(t * 1.1) * STAGE.hoverDrift * e * 0.5);
-      queenState.position.y += Math.sin(t * 4.6) * 0.1 * e;
+      queenState.position.addScaledVector(A.wtan, Math.sin(t * 1.1) * STAGE.hoverDrift * e);
+      queenState.position.y += Math.sin(t * 4.6) * 0.08 * e;
       // She turns from facing straight out of the cell to facing the light in the aperture.
       _v2.copy(A.W).sub(queenState.position).normalize();
-      _v3.copy(A.faceOut).lerp(_v2, smoothstep(0.45, 0.95, u)).normalize();
+      _v3.copy(A.faceOut).lerp(_v2, smoothstep(0.55, 0.98, u)).normalize();
       faceQueen(_v3, Math.sin(t * 1.3) * 0.1, 0.28 + e * 0.22);
     }
 
-    // --- 12.2 → 15.4 s: perch → aperture ---
-    if (t >= T.launch.at && t < T.burst.at) {
+    // --- 18.4 → 27.6 s: the crossing, comb wall to aperture, 59 m ---
+    if (t >= STAGE.liftAt && t < T.burst.at) {
       queenVisible = true;
-      const u = (t - T.launch.at) / T.launch.dur;
-      const e = u * u * (3 - 2 * u);
+      const e = crossU(t);
       queenState.position.copy(launchPath(e, _pathA));
-      _v2.copy(launchPath(Math.min(1, e + 0.03), _pathB)).sub(queenState.position).normalize();
-      faceQueen(_v2, -Math.sin(u * Math.PI) * 0.22, 0.55 + u * 0.45);
+      _v2.copy(launchPath(Math.min(1, e + 0.02), _pathB)).sub(queenState.position);
+      if (_v2.lengthSq() < 1e-6) _v2.copy(A.n);
+      _v2.normalize();
+      faceQueen(_v2, -Math.sin(e * Math.PI) * 0.22, 0.42 + e * 0.55);
     }
 
-    // --- 15.4 → 24.0 s: out into the meadow, decelerating to a hover ---
-    if (t >= T.burst.at) {
+    // --- 27.6 → 35.0 s: out into the meadow, decelerating to a hover ---
+    if (t >= T.burst.at && t < STAGE.exitEnd) {
       queenVisible = true;
       const u = exitU(t);
       queenState.position.copy(exitPath(u, _pathA));
@@ -749,13 +958,28 @@ export function createIntro(context) {
       faceQueen(_v3, -0.3 * Math.sin(u * Math.PI * 0.9) * (1 - land), 1 - land * 0.85);
     }
 
+    // --- 35.0 s → end: she holds station in the meadow while the world turns ---
+    if (t >= STAGE.exitEnd) {
+      queenVisible = true;
+      // The bob is damped to nothing over the last second so the pose handed to the play rig is
+      // `rest` exactly, not `rest` plus whatever the sine happened to be on the final frame.
+      const calm = 1 - smoothstep(DURATION - 1.4, DURATION - 0.1, t);
+      queenState.position.copy(A.rest);
+      queenState.position.y += Math.sin(t * 1.9) * 0.12 * calm;
+      queenState.position.addScaledVector(A.tan, Math.sin(t * 0.7) * 0.1 * calm);
+      _v3.copy(A.n).negate().applyAxisAngle(A.up, Math.sin(t * 0.31) * 0.16 * calm);
+      faceQueen(_v3, 0, 0.16);
+    }
+
     // --- bee traffic ---
     if (t >= T.reveal.at && t < T.launch.at) {
-      workerCount = orbit(t, 0, 26, A.hallFocus, 20.0, 18.0);
+      // Kept small and kept away from the lens: the placeholder worker is a four-sphere blob with
+      // two quad wings and it does not survive being 3 m from a 50 mm lens.
+      workerCount = orbit(t, 0, 18, A.hallFocus, 13.0, 16.0);
       workerCount = stream(t, workerCount, 16);
     } else if (t >= T.launch.at && t < T.burst.at) {
       workerCount = stream(t, 0, 14);
-    } else if (t >= T.burst.at) {
+    } else if (t >= T.burst.at && t < T.wide.at) {
       workerCount = guards(t, 0, 10);
     }
 
@@ -767,7 +991,7 @@ export function createIntro(context) {
 
   function buildTimeline() {
     const A = anchors;
-    const { inward, tan, up, n, W, O, cellRoot, cellMouth, faceOut, hivePos, rest } = A;
+    const { inward, tan, up, n, W, O, cellRoot, seedRoot, cellMouth, faceOut, wtan, hivePos, rest } = A;
     const shot = (id, extra) => Object.assign({}, T[id], extra);
     const queenAt = () => queenState.position;
 
@@ -777,68 +1001,99 @@ export function createIntro(context) {
     //   desired = rest - dir*CAMERA.distance + up*CAMERA.height,  dir = (0,0,-1)
     //   look    = rest + up*CAMERA.lookUp + dir*CAMERA.lookAhead*0.35
     const handoffPos = p(rest, n, 4.6, up, 1.35);
-    const handoffLook = p(rest, up, 0.5, n, -0.665);
+    // The rig's look target is `rest + up*CAMERA.lookUp + dir*CAMERA.lookAhead*0.35`, but it does
+    // NOT start there: createCameraRig initialises its smoothed look to the bee itself and eases in
+    // at CAMERA.lookStiffness, so its very first frame is only ~1 - exp(-17/60) = 0.246 of the way.
+    // Ending the last shot on the steady-state target therefore cut 5.29 degrees — measured — to a
+    // camera that was still most of the way back at the bee. Landing on the rig's FIRST frame
+    // instead makes the cut itself exact; the remaining few degrees are then eased in by the rig
+    // over ~0.2 s, which reads as the camera settling rather than as a jump.
+    const HANDOFF_LOOK_K = 0.246;
+    const handoffLook = p(rest, up, 0.5 * HANDOFF_LOOK_K, n, -0.665 * HANDOFF_LOOK_K);
 
     const shots = [
-      // 1. HATCH — macro on the capped natal cell, a slow 3 m push as the cap trembles and splits.
-      //    Camera 3.5–6.6 m off the comb face inside the measured lane; nearest solid 7.0 m at the
-      //    start, 8.6 m at the end. At fov 38 the frame holds about seven cells across, so the pale
-      //    capped one reads immediately instead of dissolving into a wall of wax.
+      // 1. HATCH — macro on the capped natal cell, a 2.5 m push while the capping trembles and
+      //    splits. The cell is 1 m across, so this is a long lens (24 -> 17 deg) rather than a close
+      //    camera: the frame holds ~3 cells at the start and ~1.5 at the end, and the camera never
+      //    comes within 5 m of the wall. The seven-cell flower and the seed cell sit just below her
+      //    in frame the whole time — that is the point of the shot.
       shot('hatch', {
         pos: [
-          p(cellMouth, faceOut, 6.6, tan, 2.4, up, 1.2),
-          p(cellMouth, faceOut, 3.5, tan, 0.9, up, 0.5),
+          p(cellMouth, faceOut, 9.5, wtan, 2.6, up, 1.6),
+          p(cellMouth, faceOut, 6.4, wtan, 1.3, up, 0.8),
         ],
-        look: [p(cellMouth, tan, 0.55, up, -0.22), p(cellMouth, tan, 0.3, up, -0.12)],
+        // Centred between her cell and the seed cell below it, so the seven-cell flower — the
+        // exact cluster the player will find under the START marker — is the composition and her
+        // capping is the bright thing in the middle of it.
+        look: [p(seedRoot, up, 0.50), p(seedRoot, up, 0.42)],
       }),
 
       // 2. EMERGE — a low, rising arc round the far side of the cell as she climbs out. Held on the
-      //    queen, so she is the subject from her first frame. Clearance 7.3–8.1 m throughout.
+      //    queen, so she is the subject from her first frame.
       shot('emerge', {
         pos: [
-          p(cellMouth, faceOut, 4.4, tan, -3.6, up, -1.5),
-          p(cellMouth, faceOut, 7.0, tan, -2.2, up, 1.0),
+          p(cellMouth, faceOut, 4.8, wtan, -3.1, up, -2.0),
+          p(cellMouth, faceOut, 6.9, wtan, -1.9, up, 1.35),
         ],
-        lookFn: () => _v2.copy(queenAt()).addScaledVector(up, 0.14),
+        lookFn: () => _v2.copy(queenAt()).addScaledVector(up, 0.12),
       }),
 
-      // 3. REVEAL — the scale beat: she is one cell of thousands. A slow crane up and back across
-      //    the brood wall, widening 40 -> 52, so the single cell we have been living in since the
-      //    first frame recedes into a face of comb that runs past every edge of the frame.
+      // 3. REVEAL — the scale beat, inverted from what it used to be. The old version craned back
+      //    off a 21 m prop wall of brood to say "she is one of thousands". There are seven cells,
+      //    and the honest beat is the opposite: crane back off a comb the size of a dinner plate
+      //    until it is a bright speck on 96 x 63 m of bare wall. The hollow is empty. That is the
+      //    game.
       //
-      //    Two earlier versions of this shot failed and both failures are worth keeping written
-      //    down. Pointing the look at the lit aperture put a gallery ledge 4.8 m in front of the
-      //    lens and ended the shot on a flat brown field. Craning higher and further back to open
-      //    the hall instead cleared the comb entirely and exposed its four cut edges — a rectangle
-      //    of honeycomb hanging in mid-air. The hall gets its establishing shot at `launch`, from
-      //    a camera low enough to see the far wall and the entrance light; this beat stays on the
-      //    comb, where there is always something in frame.
+      //    Two earlier framings of this shot failed and both are worth keeping written down.
+      //    Pointing the look at the lit aperture put a gallery ledge 4.8 m in front of the lens and
+      //    ended on a flat brown field. Craning until the comb left frame entirely ended on bare
+      //    wall with nothing to hold the eye. The look therefore stays pinned to the comb cluster:
+      //    however wide it goes, the thing the shot is about is still in the middle of the frame.
       shot('reveal', {
         pos: [
-          p(cellMouth, faceOut, 6.0, tan, 0.8, up, 1.2),
-          p(cellMouth, faceOut, 7.2, tan, 1.8, up, 3.6),
-          p(cellMouth, faceOut, 8.4, tan, 2.6, up, 6.0),
+          p(cellMouth, faceOut, 8.0, wtan, 0.8, up, 2.0),
+          p(cellMouth, faceOut, 23.0, wtan, 3.2, up, 7.5),
+          p(cellMouth, faceOut, 38.0, wtan, 5.5, up, 12.5),
         ],
         lookFn: (u) =>
           _v2
             .copy(queenAt())
-            .addScaledVector(up, 0.35)
-            .lerp(p(cellRoot, up, 1.5), smoothstep(0.12, 0.95, u)),
+            .addScaledVector(up, 0.3)
+            .lerp(p(seedRoot, up, 0.4), smoothstep(0.10, 0.92, u)),
       }),
 
-      // 4. LAUNCH — she leaves the perch and crosses the hall toward the light. The camera holds in
-      //    the open lane and widens instead of chasing her into the throat; the old version flew the
-      //    lens to within 2 cm of the trunk to keep up. Staying put also keeps the comb wall in the
-      //    near frame as a foreground she flies out of, so the shot never empties to bare hall.
+      // 4. HALL — the establishing shot of the hollow, and the shot she leaves the comb in. Held
+      //    wide in the open middle of the hall with the comb wall behind her, the far entrance
+      //    light in frame, and workers crossing the volume. The lens tightens 50 -> 34 as she comes
+      //    toward camera so she grows from a speck on the wall to a readable figure.
+      shot('hall', {
+        pos: [
+          p(W, inward, 34.6, tan, 14.0, up, 16.0),
+          p(W, inward, 28.6, tan, 10.0, up, 13.0),
+        ],
+        // Held on the aperture and pulled only 30% of the way toward her, so the lit hole she is
+        // heading for anchors the frame and she crosses it. Aiming this shot at the queen made it
+        // a second helping of `reveal`; aiming it above the gallery tiers is what lets the frame
+        // contain floor, ledges, ceiling and the entrance at once.
+        lookFn: (u) => _v2.copy(p(W, inward, 5.0, up, 1.0)).lerp(queenAt(), 0.14 + 0.26 * u),
+      }),
+
+      // 5. LAUNCH — reverse angle across the hall as she runs the last 30 m at the light. The
+      //    camera is deliberately still 28-32 m back from the entrance wall: the whole front third
+      //    of the hollow — throat, landing slab, gallery ledges, deco — is solid, and every camera
+      //    the old version tried near the aperture measured under a metre of clearance (0.96 m at
+      //    z = -42 in the pass before this one; 0.02 m in the version before that). She flies away
+      //    from a locked-off lens into the bright hole instead, which is the better shot anyway.
+      //    The lens tightens 46 -> 28 so she is still a readable figure as she reaches the mouth.
       shot('launch', {
         pos: [
-          p(cellMouth, faceOut, 6.4, tan, -2.6, up, -2.0),
-          p(cellMouth, faceOut, 10.4, tan, -0.6, up, -0.6),
+          p(W, inward, 30.0, tan, 12.0, up, 12.0),
+          p(W, inward, 20.6, tan, 7.0, up, 8.0),
         ],
-        lookFn: (u) => _v2.copy(queenAt()).lerp(p(cellMouth, faceOut, 9.0, up, 1.2), 0.28 * (1 - u)),
+        lookFn: (u) => _v2.copy(queenAt()).lerp(p(W, inward, 2.0, up, 0.6), 0.34 * (1 - u)),
       }),
 
-      // 5. BURST — hard cut to daylight. Camera 14.5–16 m off the trunk axis on the sunward side,
+      // 6. BURST — hard cut to daylight. Camera 14.5-16 m off the trunk axis on the sunward side,
       //    level with the aperture; nearest bark is ~9 m away, the leaf mass starts 23 m higher.
       shot('burst', {
         pos: [
@@ -848,9 +1103,8 @@ export function createIntro(context) {
         lookFn: (u) => _v2.copy(O).lerp(queenAt(), smoothstep(0.05, 0.45, u)),
       }),
 
-      // 6. WIDE — the establishing shot. Pulled in from the old 73–87 m to 52–66 m and dropped to
-      //    y 14 at the start so the tree fills the frame from root flare to crown and the camera
-      //    rises past it, rather than sitting level with the canopy watching a small tree. Still
+      // 7. WIDE — the establishing shot of the tree. 52-66 m out and dropped to y 14 at the start so
+      //    the tree fills the frame from root flare to crown and the camera rises past it. Still
       //    41 m clear of the bark at the closest point and below the leaf mass (y 37+) at the start.
       shot('wide', {
         pos: [
@@ -860,7 +1114,20 @@ export function createIntro(context) {
         look: [p(hivePos, up, 24.0), p(hivePos, up, 34.0)],
       }),
 
-      // 7. SETTLE — cut in behind her and ease onto the exact third-person pose the play rig wants.
+      // 8. LAPSE — the passage of time. Almost locked off, on the shaded side of the tree so the
+      //    sun is roughly 23-45 deg off the lens axis through the whole cycle: it crosses in and out
+      //    of frame twice, the tree is rim-lit for half of each day and flat for the other half, and
+      //    its shadow sweeps toward camera across the meadow. Everything moving in this shot is a
+      //    live system — see driveSky/driveWeather. 78 m from the trunk, 40 m clear of the canopy.
+      shot('lapse', {
+        pos: [
+          p(hivePos, tan, -44.0, up, 13.0, n, 26.0),
+          p(hivePos, tan, -38.0, up, 17.0, n, 20.0),
+        ],
+        look: [p(hivePos, up, 22.0), p(hivePos, up, 26.0)],
+      }),
+
+      // 9. SETTLE — cut in behind her and ease onto the exact third-person pose the play rig wants.
       shot('settle', {
         pos: [p(rest, tan, 1.6, up, 3.8, n, 10.0), handoffPos],
         lookFn: (u) =>
@@ -890,6 +1157,10 @@ export function createIntro(context) {
       },
       onUpdate(t, _context, dt) {
         pumpMusic(dt || 0);
+        // Every frame, not once at play(): the sprite is built lazily by comb.recompute() the
+        // first time the seeded cells land, which can be after the cinematic has already started.
+        setStartMarker(false);
+        driveWeather(t);
         const env = envAt(t);
         applyEnv(env.k, env.gain);
         stageAt(t);
@@ -904,18 +1175,23 @@ export function createIntro(context) {
     stopMusic(0.35);
     stage.visible = false;
     workers.visible = false;
-    comb.visible = false;
     cap.visible = false;
+    mouth.visible = false;
     motes.visible = false;
     envK = 1;
     applyEnv(0, 1);
     for (const node of detail) node.visible = true;
     if (ctx.queen && ctx.queen.object3D) ctx.queen.object3D.visible = true;
+    // Whatever the sequence borrowed from the world goes back here, on every exit path there is:
+    // finished, skipped or aborted.
+    restoreWeather();
+    unpatchSky();
+    setStartMarker(true);
     handoff();
   }
 
   // Places the player exactly where the last cinematic frame left the queen. The rig has not run
-  // yet, so its first update snaps to the pose shot 7 ended on — the cut into play mode is a match
+  // yet, so its first update snaps to the pose shot 9 ended on — the cut into play mode is a match
   // cut, not a jump. input.yaw/pitch are left at 0: they are driven by module-private targets in
   // core/input.js that would spring straight back if written here.
   function handoff() {
@@ -923,11 +1199,27 @@ export function createIntro(context) {
     const flight = ctx.flight;
     if (!flight || !A.rest) return;
     const spawn = A.rest.clone();
-    if (flight.simPosition) flight.simPosition.copy(spawn);
-    if (flight.velocity) flight.velocity.set(0, 0, 0);
-    if (flight.acceleration) flight.acceleration.set(0, 0, 0);
+    const park = () => {
+      if (flight.simPosition) flight.simPosition.copy(spawn);
+      if (flight.velocity) flight.velocity.set(0, 0, 0);
+      if (flight.acceleration) flight.acceleration.set(0, 0, 0);
+    };
+    park();
+    // `flight.position` is a getter that interpolates a previous and a current fixed-step position,
+    // and those two only take a copy of `simPosition` inside flight.update(). Setting simPosition
+    // alone therefore does NOT move the position the camera rig reads on its first play frame — it
+    // was still the default spawn at (0, 2.95, 0), 9.0 m and 5.3 degrees away from the pose shot 9
+    // ends on, which is exactly the snap this handoff exists to prevent. (Writing flight.position
+    // does nothing at all: it is a getter, and the next read recomputes it.) Two microscopic fixed
+    // steps push `rest` through both interpolation slots, so the render position is `rest` at every
+    // alpha and the cut is a match cut whatever moment the first play frame lands on.
+    if (typeof flight.update === 'function' && ctx.input) {
+      for (let i = 0; i < 2; i++) {
+        flight.update(1e-4, ctx.input, 0);
+        park();
+      }
+    }
     if (typeof flight.sample === 'function') flight.sample();
-    if (flight.position && flight.position.copy) flight.position.copy(spawn);
   }
 
   function releaseViewpoint() {
@@ -938,11 +1230,11 @@ export function createIntro(context) {
     const o = options || {};
     if (director.active) return false;
     buildAnchors();
-    buildComb();
     detail = detailNodes();
     restoreFog = scene.fog ? scene.fog.color.clone() : new THREE.Color(PALETTE.fog);
     envK = -1;
-    comb.visible = true;
+    patchSky();
+    setStartMarker(false);
     // The director parks the queen in the hall and flies the camera out to the meadow for
     // the establishing shots. Insideness follows the queen by default, so the hall stayed
     // drawn during those shots and its comb punched out through the bark. For the duration
@@ -963,14 +1255,6 @@ export function createIntro(context) {
     // waiting for finish().
     if (director.state && director.state.skipped) stopMusic(Math.max(0.2, CINEMATIC.skipFade * 0.8));
     const running = director.update(dt);
-    // The set's visibility is driven from stageAt(), which director.update() has just run for this
-    // frame: `T.burst.at` is the authored cut from hollow to daylight, and FLASHES fires its bloom
-    // there precisely to mask the frame where the interior shell is swapped for the world. Nothing
-    // else culls the prop — portal.insideness cannot, because the set is free-standing out in the
-    // meadow rather than inside the hall — so if that swap is ever dropped the comb wall stands on
-    // the grass beside the trunk for the whole back half of the sequence. `workers` is deliberately
-    // exempt: the swarm bursting from the entrance is the subject of the exterior shots.
-    if (!running && comb.visible) comb.visible = false;
     if (ctx.queen && typeof ctx.queen.update === 'function' && ctx.queen.object3D.visible) {
       ctx.queen.update(dt, queenState);
     }
@@ -1010,7 +1294,7 @@ export function createIntro(context) {
       const mat = node.isMesh && node.material;
       if (!mat || !node.geometry || !node.geometry.attributes.position) return;
       if (mat.transparent || mat.opacity < 1 || mat.type === 'MeshBasicMaterial') return;
-      if (/^comb_/.test(node.name || '')) return; // player-built cells, empty at t = 0
+      if (/^comb_/.test(node.name || '')) return; // instanced cells: measured analytically instead
       solids.push(node);
     });
   }
@@ -1152,6 +1436,47 @@ export function createIntro(context) {
     get duration() {
       return DURATION;
     },
+    // Where the opening thinks the natal cell is, next to where the hive says its seed comb is.
+    // These two must agree to within one cell width or the queen is hatching out of nothing.
+    natalReport() {
+      buildAnchors();
+      const A = anchors;
+      const comb = ctx.comb;
+      const anchor = comb && typeof comb.seedAnchor === 'function' ? comb.seedAnchor() : null;
+      const nearestReal = comb && typeof comb.nearestCell === 'function'
+        ? comb.nearestCell(A.cellRoot)
+        : null;
+      const round = (v) => [Number(v.x.toFixed(3)), Number(v.y.toFixed(3)), Number(v.z.toFixed(3))];
+      return {
+        seedAnchor: anchor ? { cell: [anchor.col, anchor.row, anchor.layer], position: round(anchor.position) } : null,
+        natalCell: A.natalCell ? [A.natalCell.col, A.natalCell.row, A.natalCell.layer] : null,
+        natalPosition: round(A.cellRoot),
+        natalMouth: round(A.cellMouth),
+        faceOut: round(A.faceOut),
+        cellSize: Number(A.cellSize.toFixed(4)),
+        distanceToSeed: anchor ? Number(A.cellRoot.distanceTo(anchor.position).toFixed(3)) : null,
+        // The comb's own answer to "which real cell is nearest the point you are shooting?"
+        nearestRealCell: nearestReal
+          ? { cell: [nearestReal.col, nearestReal.row, nearestReal.layer], position: round(nearestReal.position) }
+          : null,
+      };
+    },
+    // The authored time-lapse curve, offline: sky offset in days and the weather phase index at
+    // each instant. The live proof is sampling sky.sun and weather.state while it runs; this is the
+    // authored intent those samples are checked against.
+    lapsePlan(steps) {
+      const n = Math.max(2, steps || 24);
+      const out = [];
+      for (let i = 0; i <= n; i++) {
+        const t = LAPSE.skyFrom - 1 + ((LAPSE.skyTo + 2 - (LAPSE.skyFrom - 1)) * i) / n;
+        out.push({
+          t: Number(t.toFixed(2)),
+          skyOffsetDays: Number(skyOffsetAt(t).toFixed(4)),
+          wxPhase: t >= LAPSE.wxOn ? Math.floor(((t - LAPSE.wxOn) * 1000) / LAPSE.wxPhaseMs) : null,
+        });
+      }
+      return { window: LAPSE, samples: out };
+    },
     // Offline dump of the authored camera path, through the same shotPosition() the live camera
     // uses. This is what the geometry-clearance check is run against: every shot here authors a
     // static `pos` track, so the result is exact and independent of frame rate.
@@ -1181,6 +1506,10 @@ export function createIntro(context) {
     //   window.hollowtree.cinematic.intro.measureClearance()
     //
     // Acceptance: `under0_6` must be 0 and `globalMin` must stay well above the 0.1 m near plane.
+    // The shipped path holds every sample above 3 m. That is lower than the 5.8 m the prop-comb
+    // staging managed, and necessarily so: the subject of the first three shots is now a 1 m cell
+    // ON a wall rather than a slab hanging in the middle of the room, so the camera has to be able
+    // to see that wall. 3 m is thirty times the near plane and there is no near-miss anywhere.
     measureClearance(steps) {
       const field = solidField();
       const path = this.samplePath(steps || 2400);
@@ -1213,6 +1542,14 @@ export function createIntro(context) {
         worst: sorted.slice(0, 8),
       };
     },
+    // Point probe on the same field, for designing a shot before it exists.
+    probeClearance(points) {
+      const field = solidField();
+      return (points || []).map((q) => {
+        const near = field.nearest(q[0], q[1], q[2]);
+        return { at: q, d: Number.isFinite(near.d) ? Number(near.d.toFixed(3)) : null, hit: near.tag };
+      });
+    },
     // The companion check to measureClearance(). Clearance proves the camera is not buried in a
     // wall; it says nothing about whether the shot has anything in it. A camera 5 m off a flat
     // ledge, aimed at that ledge, is perfectly "clear" and renders as a flat brown field — which is
@@ -1220,29 +1557,26 @@ export function createIntro(context) {
     //
     // So: pose a scratch camera on the authored track at each time, sphere-trace a 5x5 grid of rays
     // through the frustum against the same distance field, and look at the spread of hit distances.
-    // Note this measures the STATIC set — hall, trunk, canopy — not the queen or the workers, so a
-    // shot whose only subject is the queen still has to be judged from a frame.
+    // Note this measures the STATIC set — hall, trunk, canopy, plus the comb cluster as a sphere —
+    // not the queen or the workers, so a shot whose only subject is the queen still has to be
+    // judged from a frame.
     //
     //   nearest / median / farthest   depth of the surfaces actually in frame
     //   openRays                      rays that hit nothing (sky, or the unlit depth of the hall)
     //   spread                        farthest / nearest — 1.0 means every ray landed on one plane
     //
     // A shot reads when the frame has layers: either spread well above ~1.6, or open rays behind a
-    // near subject. spread ≈ 1.0 with no open rays is the signature of a flat wash.
+    // near subject. spread ≈ 1.0 with no open rays is the signature of a flat wash — with the
+    // caveat that the two macro shots are ON a flat wall by design and are judged from frames.
     measureFraming(times) {
       buildAnchors();
-      buildComb();
-      // The probe has to see the set to measure it, so remember what it found and hand it back
-      // untouched — this is callable mid-sequence and must not leave the prop standing.
       const wasStage = stage.visible;
-      const wasComb = comb.visible;
       const wasEnvK = envK;
       const wasDetail = detail;
       if (!detail.length) detail = detailNodes();
       const restoreVis = detail.map((node) => node.visible);
       const interiorWasVisible = ctx.interior ? ctx.interior.group.visible : false;
       stage.visible = true;
-      comb.visible = true;
       const line = buildTimeline();
       const list = times && times.length
         ? times
@@ -1251,22 +1585,15 @@ export function createIntro(context) {
       const field = solidField();
       const FAR = 220;
 
-      // solidField() only collects the hall and the tree, and the comb is a 420-instance
-      // InstancedMesh whose triangles are expensive to expand. But the comb IS the subject of the
-      // first three shots, so measure it analytically instead: it is a flat slab, and its distance
-      // is the usual point-to-box in the (tan, up, faceOut) frame it was built in.
+      // solidField() skips the `comb_*` instanced meshes — their triangles live in instance
+      // matrices, not in the world matrix — but the comb cluster IS the subject of the first three
+      // shots, so measure it as the sphere it very nearly is: seven cells of radius cellSize,
+      // centred on the seed.
       const A = anchors;
-      const halfW = (STAGE.combCols * INTRO.combPitch) * 0.5;
-      const halfH = (STAGE.combRows * INTRO.combRowRise) * 0.5;
-      const halfD = INTRO.combCellDepth * 0.5;
+      const clusterR = A.cellSize * 1.7;
       const rel = new THREE.Vector3();
       function combDistance(x, y, z) {
-        if (!comb.visible) return Infinity;
-        rel.set(x, y, z).sub(A.cellRoot);
-        const ex = Math.max(0, Math.abs(rel.dot(A.tan)) - halfW);
-        const ey = Math.max(0, Math.abs(rel.dot(A.up)) - halfH);
-        const ez = Math.max(0, Math.abs(rel.dot(A.faceOut)) - halfD);
-        return Math.hypot(ex, ey, ez);
+        return Math.max(0, rel.set(x, y, z).sub(A.seedRoot).length() - clusterR);
       }
 
       // Sphere tracing on the distance field: step by the distance to the nearest surface, which
@@ -1349,7 +1676,6 @@ export function createIntro(context) {
         });
       }
       stage.visible = wasStage;
-      comb.visible = wasComb;
       detail.forEach((node, i) => {
         node.visible = restoreVis[i];
       });
@@ -1360,12 +1686,15 @@ export function createIntro(context) {
     },
     dispose() {
       releaseViewpoint();
+      restoreWeather();
+      unpatchSky();
+      setStartMarker(true);
       stopMusic(0.2);
       director.dispose();
       scene.remove(stage);
       workerGeo.dispose();
-      combGeo.dispose();
       capGeo.dispose();
+      mouthGeo.dispose();
       moteGeo.dispose();
     },
   };

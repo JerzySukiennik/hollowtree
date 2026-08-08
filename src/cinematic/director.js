@@ -146,6 +146,12 @@ export function createDirector(options) {
   let skipping = false;
   let skipAt = 0;
   let cardKey = '';
+  // Verification hook. The sequence is a pure function of elapsed time, but "elapsed" normally
+  // comes from the wall clock, and the capture harness only composites a frame while a screenshot
+  // is being taken — so grabbing one frame per shot in real time is a race. hold(t) pins the
+  // clock to an exact instant so a screenshot pass can seek shot by shot and get the same frame
+  // every run. Nothing in play calls it; release() puts the wall clock back where it was.
+  let held = null;
 
   const state = {
     active: false,
@@ -301,6 +307,11 @@ export function createDirector(options) {
   }
 
   function advance(dt) {
+    if (held !== null) {
+      localTime = held;
+      state.time = held;
+      return;
+    }
     const wall = (Date.now() - startedAt) * 0.001;
     localTime += dt;
     const drift = wall - localTime;
@@ -326,6 +337,7 @@ export function createDirector(options) {
     if (!state.active) return;
     state.active = false;
     state.shot = '';
+    held = null;
     listen(false);
     if (ui) {
       ui.root.remove();
@@ -358,6 +370,21 @@ export function createDirector(options) {
     if (shot && typeof shot.onEnter === 'function') shot.onEnter(context, true);
   }
 
+  function hold(t) {
+    held = Math.max(0, Number(t) || 0);
+    localTime = held;
+    state.time = held;
+    eventCursor = 0;
+    if (timeline) fireEvents(held, true);
+    return held;
+  }
+
+  function release() {
+    if (held === null) return;
+    startedAt = Date.now() - held * 1000;
+    held = null;
+  }
+
   function play(spec, opts) {
     if (state.active) finish();
     const o = opts || {};
@@ -369,6 +396,7 @@ export function createDirector(options) {
     skipping = false;
     skipAt = 0;
     cardKey = '';
+    held = null;
 
     for (const shot of timeline.shots) resolveTracks(shot);
 
@@ -443,6 +471,11 @@ export function createDirector(options) {
     update,
     skip,
     seek,
+    hold,
+    release,
+    get held() {
+      return held;
+    },
     stop: finish,
     get active() {
       return state.active;

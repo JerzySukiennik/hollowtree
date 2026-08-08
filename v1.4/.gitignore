@@ -1,0 +1,8 @@
+.DS_Store
+Niepotrzebne/
+.env
+*.blend1
+
+# Kenney input-prompt sheets: 21 MB, not referenced by any code yet. Re-add the
+# specific sprites when the UI needs them instead of shipping the whole pack.
+assets/ui/inputprompts/
