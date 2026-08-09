@@ -650,6 +650,8 @@ async function boot() {
     if (season && post && typeof post.setSeasonPhase === 'function') {
       post.setSeasonPhase(season.index, season.t);
     }
+    // Dawn and dusk, from the same clock value the sky gets.
+    if (post && typeof post.setDayPhase === 'function') post.setDayPhase(timeOfDay);
 
     if (gather && mode === 'play') {
       const bank = bankSnapshot || resources.snapshot();

@@ -55,6 +55,12 @@ export const AUDIO = {
     nightFloor: 0.12,
     nightLevel: 0.95,
     duskWarmth: 0.28,
+    // Dawn and dusk are birds INSTEAD of cicadas, not birds on top of them. Cicadas are
+    // ducked by this much at the peak of each event, which is what makes the hour audible
+    // rather than merely louder. Matches POST.grade.goldenWidth so the ear and the eye
+    // change their mind at the same moment.
+    goldenDuck: 0.75,
+    goldenWidth: 0.055,
     seasonGlide: 2.6,
     dayGlide: 0.9,
     outsideDuck: 0.9,

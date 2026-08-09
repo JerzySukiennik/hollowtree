@@ -40,7 +40,7 @@ export function createAmbience(ctx, library, destination) {
   }
 
   const weights = { ...cfg.seasons.summer };
-  const state = { season: 'summer', dayness: 1, insideness: 0 };
+  const state = { season: 'summer', dayness: 1, insideness: 0, golden: 0 };
 
   function update(dt, context) {
     const season = normalizeSeason(context.season);
@@ -68,11 +68,25 @@ export function createAmbience(ctx, library, destination) {
     const outside = 1 - inside * cfg.outsideDuck;
     const golden = 1 + cfg.duskWarmth * (1 - Math.abs(day - 0.5) * 2);
 
+    // How deep into dawn or dusk we are, 0..1, from the clock rather than from `dayness`:
+    // dayness is a smoothed crossfade and peaks nowhere in particular, so it cannot say
+    // "this is the hour". Distance wraps, so an event near midnight is not cut in half.
+    let goldenNow = 0;
+    for (const at of [cfg.dawn, cfg.dusk]) {
+      let d = Math.abs(time - at);
+      if (d > 0.5) d = 1 - d;
+      const k = 1 - Math.min(1, d / (cfg.goldenWidth || 0.055));
+      if (k > goldenNow) goldenNow = k;
+    }
+    goldenNow = goldenNow * goldenNow * (3 - 2 * goldenNow);
+    state.golden = goldenNow;
+
     const base = cfg.layers;
     layers.meadow.setTarget(weights.meadow * base.meadow.gain * (cfg.nightFloor + day * (1 - cfg.nightFloor)) * outside);
     layers.birds.setTarget(weights.birds * base.birds.gain * day * golden * outside);
     layers.cicadas.setTarget(
       weights.cicadas * base.cicadas.gain * (0.35 + 0.65 * Math.max(day, night * 0.5)) * outside
+        * (1 - (cfg.goldenDuck || 0) * goldenNow)
     );
     layers.windCalm.setTarget(weights.windCalm * base.windCalm.gain * outside);
     layers.windForest.setTarget(weights.windForest * base.windForest.gain * (0.7 + 0.3 * night) * outside);

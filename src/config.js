@@ -1100,6 +1100,18 @@ export const POST = {
     // colour, so the four are distinguishable; without this the palette would be in
     // permanent motion and no season would ever look like itself.
     seasonBlendShare: 0.22,
+    // Dawn and dusk as an event rather than a gradient. The sun already drops to about 11
+    // degrees at both ends of the day, so the long shadows come free; what was missing was
+    // the colour that makes the hour recognisable without reading a clock.
+    //
+    // These two times match AUDIO.ambience.dawn/dusk deliberately: the birds come up as the
+    // light turns, so the ear and the eye agree about what time it is.
+    goldenTint: 0xffab5e,
+    goldenMix: 0.30,
+    goldenAt: [0.24, 0.80],
+    // How wide each event is, as a share of the day. Narrow enough to be an occasion --
+    // roughly forty minutes of a full day-night cycle, not an afternoon.
+    goldenWidth: 0.055,
   },
 };
 

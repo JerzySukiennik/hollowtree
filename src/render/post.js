@@ -388,6 +388,9 @@ export function createPost(renderer, scene, camera) {
   const insideTint = hexToVec3(POST.grade.insideTint, new Vector3());
   const seasonTint = hexToVec3(POST.grade.seasonTint, new Vector3());
   const _seasonNext = new Vector3();
+  const goldenTint = hexToVec3(POST.grade.goldenTint, new Vector3());
+  // 0 in the flat middle of the day and in the dead of night, 1 at dawn and at dusk.
+  let golden = 0;
   const prevViewProj = new Matrix4();
   const viewProj = new Matrix4();
   const prevCamPos = new Vector3().copy(camera.position);
@@ -564,11 +567,19 @@ export function createPost(renderer, scene, camera) {
       POST.grade.vignetteInside,
       insideness
     );
+    // Season, then the golden hour on top of it, then the hollow's own warmth. Order
+    // matters: dawn happens to the meadow whatever the month, but once she is inside the
+    // tree the wood's light wins -- there is no horizon in there to go golden.
+    gradeMaterial.uniforms.uSeasonTint.value.copy(seasonTint);
+    let mix = POST.grade.seasonMix;
+    if (golden > 0.0001) {
+      gradeMaterial.uniforms.uSeasonTint.value.lerp(goldenTint, golden);
+      mix = mix + (POST.grade.goldenMix - mix) * golden;
+    }
     gradeMaterial.uniforms.uSeasonTint.value
-      .copy(seasonTint)
       .lerp(insideTint, insideness * POST.grade.insideWarmth);
     gradeMaterial.uniforms.uSeasonMix.value = Math.max(
-      POST.grade.seasonMix,
+      mix,
       insideness * POST.grade.insideWarmth
     );
 
@@ -731,10 +742,34 @@ export function createPost(renderer, scene, camera) {
     },
     // Probe window on the season grade: the tint actually in the uniform and the strength
     // it is applied at, so the handover can be checked for a step rather than eyeballed.
+    // Drive the golden hour from the world clock. `timeOfDay` is 0..1 across a full cycle,
+    // the same value the sky is already given, so the light and the colour cannot disagree.
+    setDayPhase(timeOfDay) {
+      const t = Number(timeOfDay);
+      if (!Number.isFinite(t)) { golden = 0; return; }
+      const w = POST.grade.goldenWidth || 0.05;
+      let peak = 0;
+      for (const at of POST.grade.goldenAt || []) {
+        // Wrap the distance, so an event sitting near midnight is not cut in half by the
+        // seam where the day rolls over.
+        let d = Math.abs(t - at);
+        if (d > 0.5) d = 1 - d;
+        const k = 1 - Math.min(1, d / w);
+        if (k > peak) peak = k;
+      }
+      golden = peak * peak * (3 - 2 * peak);
+    },
     gradeDebug() {
       return {
         tint: [seasonTint.x, seasonTint.y, seasonTint.z],
         mix: POST.grade.seasonMix,
+        golden,
+        applied: [
+          gradeMaterial.uniforms.uSeasonTint.value.x,
+          gradeMaterial.uniforms.uSeasonTint.value.y,
+          gradeMaterial.uniforms.uSeasonTint.value.z,
+        ],
+        appliedMix: gradeMaterial.uniforms.uSeasonMix.value,
       };
     },
     setTier(value) {
