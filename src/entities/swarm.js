@@ -269,6 +269,62 @@ export function createSwarm({ scene, assets, flight, flowers, gather, comb, net 
     return made === want;
   }
 
+  // ---- brood: larvae ripening into workers -------------------------------
+  //
+  // One clock per brood cell, kept here rather than on the cell record, because hatching is
+  // this player's business: the comb is shared, the flock is not. A cell demolished or lost
+  // over the network takes its clock with it on the next sweep, and a newly finished cell
+  // starts a short first wait so the payoff arrives while the player is still watching.
+  const broodClocks = new Map();
+  const broodSeen = new Set();
+  const broodStats = { hatched: 0, blockedByCap: 0, cells: 0 };
+
+  function broodTick(step) {
+    const cfg = SWARM.brood;
+    if (!cfg || !comb || !comb.cells || typeof comb.cells.values !== 'function') return;
+
+    broodSeen.clear();
+    let cells = 0;
+    for (const cell of comb.cells.values()) {
+      if (cell.type !== cfg.cell || !cell.done || cell.active === false) continue;
+      cells++;
+      broodSeen.add(cell.key);
+      let left = broodClocks.get(cell.key);
+      if (left === undefined) {
+        left = cfg.seconds * cfg.firstShare;
+        broodClocks.set(cell.key, left);
+        continue;
+      }
+      left -= step;
+      if (left > 0) { broodClocks.set(cell.key, left); continue; }
+
+      // Ripe. The cap is the comb's and is checked here rather than at the timer, so a
+      // full hive holds its larvae ready instead of quietly losing them -- the moment a
+      // worker starves or the cap grows, the queue empties.
+      if (localCount() >= limitNow()) {
+        broodStats.blockedByCap++;
+        broodClocks.set(cell.key, 0);
+        continue;
+      }
+      const slot = TYPE_SLOT.get(cfg.type);
+      if (slot === undefined || !spawn(localFlock, slot)) {
+        broodClocks.set(cell.key, 0);
+        continue;
+      }
+      broodStats.hatched++;
+      broodClocks.set(cell.key, cfg.seconds);
+      pushStaffing();
+    }
+
+    // Forget clocks whose cell is gone, so a rebuilt cell does not inherit a stale one.
+    if (broodClocks.size !== broodSeen.size) {
+      for (const key of Array.from(broodClocks.keys())) {
+        if (!broodSeen.has(key)) broodClocks.delete(key);
+      }
+    }
+    broodStats.cells = cells;
+  }
+
   // ---- collective gathering ---------------------------------------------
   const probe = new Vector3();
   const fIdx = new Int32Array(SWARM.probeMax);
@@ -583,6 +639,9 @@ export function createSwarm({ scene, assets, flight, flowers, gather, comb, net 
     let over = localCount() - cap;
     while (over-- > 0) { if (!starveOne()) break; }
 
+    // Larvae ripen after the cull, so a hatch never races the same frame's starvation.
+    broodTick(step);
+
     // anchor points, one per flock, per frame
     for (const flock of flocks) {
       const ref = flock.anchorRef;
@@ -710,6 +769,9 @@ export function createSwarm({ scene, assets, flight, flowers, gather, comb, net 
     despawnRemote,
     upkeep,
     stats,
+    get broodStats() { return broodStats; },
+    // Probe hook: empty the local flock so a hatch can be timed from zero.
+    starveOne,
     meshes: pools.map((p) => p.mesh),
     dispose,
   };

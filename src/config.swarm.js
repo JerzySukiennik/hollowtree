@@ -98,6 +98,28 @@ export const SWARM = {
   floorLimit: 2,
   baseLimit: 3,
 
+  // ---------------------------------------------------------------- brood
+  // A finished brood cell raises the cap AND now fills it: a larva ripens in the cell and
+  // flies out as a worker, free, because the cell was already paid for once. This is what
+  // turns the comb from a table of numbers into something alive.
+  //
+  // Hatching is per player, exactly like buy(): every queen publishes her own composition
+  // (main.js does it in publishSelf), so each grows her own flock from the shared comb's
+  // brood cells. Nothing per-bee crosses the wire, which is the invariant this file exists
+  // to protect.
+  brood: {
+    cell: 'brood',
+    // Which worker a larva becomes. `forager` needs no cell of its own, so a brood cell
+    // alone is enough to see one fly.
+    type: 'forager',
+    // Seconds from a cell being ready to a worker leaving it. Two brood cells halve the
+    // wait because each keeps its own clock.
+    seconds: 22,
+    // The first larva of a freshly built cell takes this share of the full wait -- so the
+    // reward for building lands while the player is still looking at the wall.
+    firstShare: 0.45,
+  },
+
   // Instanced pool per worker type. Three queens × 200 bees is the contract, but those
   // 600 are spread over types and flocks, so one type never needs the full budget.
   poolPerType: 640,
