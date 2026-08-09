@@ -9,7 +9,7 @@
 //      move are the handful still under construction, and they move on a fixed tick.
 
 import * as THREE from 'three';
-import { COMB } from '../config.js';
+import { COMB, QUEEN_STYLE } from '../config.js';
 import {
   CELL_TYPES, ALL_CELL_TYPES, CELL_BY_ID, COMB_TUNING, COST_KINDS, costOf, refundOf,
 } from '../config.comb.js';
@@ -19,6 +19,7 @@ const _quat = new THREE.Quaternion();
 const _scale = new THREE.Vector3(1, 1, 1);
 const _mat = new THREE.Matrix4();
 const _color = new THREE.Color();
+const _ringOffset = new THREE.Vector3();
 const _neighbours = [];
 
 const CAP_KINDS = ['pollen', 'nectar', 'resin', 'honey'];
@@ -192,6 +193,137 @@ export function createComb(options) {
     scene.add(group);
   }
 
+  // ------------------------------------------------------------- who built which cell
+  //
+  // A thin hex ring sitting just proud of each cell's mouth, in the livery of the queen who
+  // placed it. One InstancedMesh for every owner at once, so the whole feature costs a single
+  // draw call however many queens are in the hive.
+  //
+  // Colour is resolved in three steps, in this order: the live roster, then a cache of every
+  // uid this session has ever seen, then a stable hash of the uid. The cache is what makes
+  // the spec's "still works when the author has left" true -- a queen who quits vanishes from
+  // the roster, but her cells keep her colour. The hash is the floor: a hive loaded from the
+  // database with cells from a queen this session never met still shows them as *someone
+  // else's*, which is the actual question the player is asking.
+  let ownerRing = null;
+  const ownerRingSlots = [];
+  let ownerRingCount = 0;
+  const ownerColorCache = new Map();
+  let ownerTick = 0;
+  const _ringColor = new THREE.Color();
+
+  if (group) {
+    const cellRadius = (grid.cellSize() * COMB_TUNING.fill) / Math.sqrt(3);
+    // thetaStart lines the ring's six corners up with the cell cylinder's, which starts its
+    // first vertex a quarter turn round from RingGeometry's default.
+    const ringGeo = new THREE.RingGeometry(cellRadius * 0.99, cellRadius * 1.14, 6, 1, -Math.PI / 2);
+    const ringMat = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    ownerRing = new THREE.InstancedMesh(ringGeo, ringMat, COMB.maxCells);
+    ownerRing.name = 'comb_owner_rings';
+    ownerRing.count = 0;
+    ownerRing.frustumCulled = false;
+    ownerRing.renderOrder = 2;
+    ownerRing.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    ownerRing.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(COMB.maxCells * 3), 3);
+    ownerRing.instanceColor.setUsage(THREE.DynamicDrawUsage);
+    group.add(ownerRing);
+  }
+
+  function rosterColors() {
+    if (!net || typeof net.roster !== 'function') return;
+    for (const queen of net.roster()) {
+      if (queen && queen.uid) ownerColorCache.set(queen.uid, queen.color || QUEEN_STYLE.defaultColor);
+    }
+  }
+
+  function ownerColorId(owner) {
+    if (!owner || owner === SEED_OWNER) return null;
+    const known = ownerColorCache.get(owner);
+    if (known) return known;
+    // Stable fallback: same uid always lands on the same livery, so two unknown builders
+    // never collapse into one colour.
+    let hash = 0;
+    for (let i = 0; i < owner.length; i++) hash = (hash * 31 + owner.charCodeAt(i)) >>> 0;
+    return QUEEN_STYLE.colors[hash % QUEEN_STYLE.colors.length].id;
+  }
+
+  function ownerHex(owner) {
+    const id = ownerColorId(owner);
+    if (!id) return null;
+    const found = QUEEN_STYLE.colors.find((c) => c.id === id);
+    return found ? found.hex : null;
+  }
+
+  function writeRing(cell) {
+    if (!ownerRing || cell.ring < 0) return;
+    const hex = ownerHex(cell.owner);
+    grid.cellCenter(cell.col, cell.row, cell.layer, _pos);
+    grid.cellBasis(cell.col, cell.row, _quat);
+    // Nudge the ring out along the cell's own normal so it never z-fights the mouth.
+    _ringOffset.set(0, 0, COMB.cellDepth * COMB_TUNING.depthFill * 0.5 + 0.004).applyQuaternion(_quat);
+    _pos.add(_ringOffset);
+    // An unfinished cell's ring grows with it, so the livery arrives with the cell rather
+    // than snapping on at the end.
+    const s = cell.done ? 1 : COMB_TUNING.growFrom + (1 - COMB_TUNING.growFrom) * cell.progress;
+    _scale.set(s, s, s);
+    _mat.compose(_pos, _quat, _scale);
+    ownerRing.setMatrixAt(cell.ring, _mat);
+    markRange(ownerRing.instanceMatrix, cell.ring, 16);
+    ownerRing.setColorAt(cell.ring, _ringColor.set(hex || '#000000'));
+    markRange(ownerRing.instanceColor, cell.ring, 3);
+    cell.ringHex = hex;
+  }
+
+  function acquireRing(cell) {
+    // Seed cells belong to the hollow itself, not to a queen, and stay unmarked.
+    if (!ownerRing || !ownerHex(cell.owner) || ownerRingCount >= COMB.maxCells) {
+      cell.ring = -1;
+      return;
+    }
+    cell.ring = ownerRingCount++;
+    ownerRingSlots[cell.ring] = cell;
+    ownerRing.count = ownerRingCount;
+    writeRing(cell);
+  }
+
+  function releaseRing(cell) {
+    if (!ownerRing || cell.ring < 0) return;
+    const last = ownerRingCount - 1;
+    if (cell.ring !== last) {
+      const moved = ownerRingSlots[last];
+      ownerRing.getMatrixAt(last, _mat);
+      ownerRing.setMatrixAt(cell.ring, _mat);
+      markRange(ownerRing.instanceMatrix, cell.ring, 16);
+      ownerRing.getColorAt(last, _ringColor);
+      ownerRing.setColorAt(cell.ring, _ringColor);
+      markRange(ownerRing.instanceColor, cell.ring, 3);
+      moved.ring = cell.ring;
+      ownerRingSlots[cell.ring] = moved;
+    }
+    ownerRingSlots[last] = null;
+    ownerRingCount = last;
+    ownerRing.count = last;
+    cell.ring = -1;
+  }
+
+  // Cheap because it only writes when a colour actually changed: joining the hive late, or
+  // reading someone's livery for the first time, repaints their cells and nothing else.
+  function refreshOwnerColors() {
+    if (!ownerRing) return 0;
+    rosterColors();
+    let repainted = 0;
+    for (const cell of cells.values()) {
+      if (cell.ring < 0) continue;
+      if (ownerHex(cell.owner) !== cell.ringHex) { writeRing(cell); repainted++; }
+    }
+    return repainted;
+  }
+
   function markRange(attribute, slot, stride) {
     if (!attribute) return;
     if (typeof attribute.addUpdateRange === 'function') {
@@ -221,6 +353,8 @@ export function createComb(options) {
     entry.mesh.setMatrixAt(cell.slot, _mat);
     markRange(entry.mesh.instanceMatrix, cell.slot, 16);
     stats.matrixWrites++;
+    // The livery ring rides the same growth curve as the cell it belongs to.
+    if (cell.ring >= 0) writeRing(cell);
   }
 
   function writeTint(cell) {
@@ -271,16 +405,20 @@ export function createComb(options) {
 
   function insert(record) {
     record.slot = -1;
+    record.ring = -1;
+    record.ringHex = null;
     grid.cells.set(record.key, {
       col: record.col, row: record.row, layer: record.layer, key: record.key, data: record,
     });
     cells.set(record.key, record);
     acquireSlot(record);
+    acquireRing(record);
     if (!record.done) building.add(record);
   }
 
   function drop(record) {
     building.delete(record);
+    releaseRing(record);
     releaseSlot(record);
     cells.delete(record.key);
     grid.cells.delete(record.key);
@@ -992,6 +1130,13 @@ export function createComb(options) {
   function update(dt) {
     if (disposed || !(dt > 0)) return;
 
+    // Liveries are read on a slow tick rather than wired to a presence callback: a queen can
+    // change her colour mid-session, and this way there is exactly one path that repaints.
+    // It writes nothing unless a colour actually differs, so the steady state is a walk over
+    // a few dozen cells twice a second.
+    ownerTick += dt;
+    if (ownerTick >= 0.5) { ownerTick = 0; refreshOwnerColors(); }
+
 
     // Only cells still growing touch the GPU, and only on a fixed tick. A finished comb
     // of any size costs nothing here.
@@ -1087,6 +1232,26 @@ export function createComb(options) {
     demolish,
     canPlace,
     affordable(typeId) { return affordable(costOf(typeId)); },
+    refreshOwnerColors,
+    ownerColorOf(owner) { return ownerHex(owner); },
+    // How much is missing, per resource, for a type you cannot pay for yet. Lives here
+    // rather than in the panel because it must read the same wallet `affordable` reads --
+    // honey comes from the comb's own stores, the other three from the shared bank, and a
+    // panel computing this from its own snapshot would drift the moment those disagree.
+    // Returns null when the type is affordable, so a caller can branch on truthiness.
+    shortfall(typeId) {
+      const cost = costOf(typeId);
+      let missing = null;
+      for (const kind of COST_KINDS) {
+        const want = cost[kind] || 0;
+        if (want <= 0) continue;
+        const gap = want - bankValue(kind);
+        // The same epsilon `affordable` uses, so the two can never disagree about whether
+        // a cell is payable: no type may be red with an empty shortfall, or vice versa.
+        if (gap > 1e-6) (missing || (missing = {}))[kind] = gap;
+      }
+      return missing;
+    },
     costOf,
     refundOf,
     unlockedTypes,

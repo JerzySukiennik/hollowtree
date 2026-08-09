@@ -899,7 +899,7 @@ export const MENU = {
     optionSfx: 'Effects',
     optionQuality: 'Visual quality',
     optionQualityNote: 'Applies to bloom and depth of field.',
-    footer: 'W A S D to fly · Space and Shift for height · E to gather · Tab to build inside the hollow',
+    footer: 'W A S D to fly · Space up, C down · Shift to hurry · E to gather · Tab to build inside the hollow',
   },
 };
 

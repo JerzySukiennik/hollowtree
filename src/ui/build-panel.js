@@ -103,6 +103,19 @@ function costText(cost) {
   return parts.join(' ') || '<b>free</b>';
 }
 
+// What is missing, named and counted. `poor` used to be a colour and nothing else: the row
+// turned red and the player had to guess whether they were one resin short or thirty, and of
+// what. Rounds up, because half a resin still blocks the placement.
+function shortHtml(missing) {
+  const parts = [];
+  for (const kind of COST_KINDS) {
+    const gap = missing[kind];
+    if (!(gap > 0)) continue;
+    parts.push(`<b style="color:${KIND_COLOR[kind]}">${Math.ceil(gap)}</b> ${KIND_LABEL[kind]}`);
+  }
+  return parts.length ? `need ${parts.join(' + ')}` : '';
+}
+
 function costHtml(cost) {
   const parts = [];
   for (const kind of COST_KINDS) {
@@ -146,7 +159,9 @@ export function createBuildPanel(handlers) {
     row.addEventListener('click', () => {
       if (typeof on.onSelect === 'function') on.onSelect(type.id);
     });
-    rows.set(type.id, { type, row, name, cost, locked: null, selected: null, poor: null });
+    rows.set(type.id, {
+      type, row, name, cost, locked: null, selected: null, poor: null, costHtml: null,
+    });
   }
 
   const foot = el('div', 'ht-build-foot', card);
@@ -222,10 +237,20 @@ export function createBuildPanel(handlers) {
         entry.selected = selected;
         entry.row.classList.toggle('is-sel', selected);
       }
-      const poor = !comb.affordable(id);
+      // The shortfall doubles as the affordability test -- one source, so the red state and
+      // the number it explains can never disagree.
+      const missing = typeof comb.shortfall === 'function' ? comb.shortfall(id) : null;
+      const poor = missing ? true : !comb.affordable(id);
       if (entry.poor !== poor) {
         entry.poor = poor;
         entry.row.classList.toggle('is-poor', poor);
+      }
+      // Swap the row's cost readout for the gap while it is out of reach: the price is
+      // useless information when you cannot pay it, and the row has no space for both.
+      const wantHtml = missing ? shortHtml(missing) : costText(entry.type.cost);
+      if (entry.costHtml !== wantHtml) {
+        entry.costHtml = wantHtml;
+        entry.cost.innerHTML = wantHtml;
       }
     }
 
@@ -234,7 +259,12 @@ export function createBuildPanel(handlers) {
     const iconUrl = type ? cellIconUrl(type.type.id, 22) : '';
     if (selIcon.getAttribute('src') !== iconUrl) selIcon.src = iconUrl;
     selIcon.style.visibility = type ? 'visible' : 'hidden';
-    setHtml(costLine, type ? costHtml(type.type.cost) : '');
+    // The footer keeps the full price and adds the gap after it, because here there is room
+    // for both and the player is deciding whether this cell is worth another trip out.
+    const selMissing = type && typeof comb.shortfall === 'function' ? comb.shortfall(type.type.id) : null;
+    setHtml(costLine, type
+      ? costHtml(type.type.cost) + (selMissing ? ` — <span style="color:#ff9b8c">${shortHtml(selMissing)}</span>` : '')
+      : '');
     setText(blurb, type ? type.type.blurb : '');
 
     const bonus = state.bonus;

@@ -33,7 +33,13 @@ function refreshKeyboard() {
   const left = keys.has('KeyA') || keys.has('ArrowLeft');
   const right = keys.has('KeyD') || keys.has('ArrowRight');
   const rise = keys.has('Space');
-  const sink = keys.has('KeyC') || keys.has('ControlLeft') || keys.has('ControlRight');
+  // Descend is plain letters only -- no modifier belongs on a key you hold while flying.
+  // Ctrl used to be bound here, which made "forward and down" literally Ctrl+W: the
+  // browser's own close-this-tab, which no page is permitted to intercept. Players were
+  // being thrown out of the hive mid-flight by a control the game told them to hold.
+  // Alt is no better, because Alt+Left/Right is browser back/forward and the arrow keys
+  // fly. X sits next to C under the same hand, and neither means anything to a browser.
+  const sink = keys.has('KeyC') || keys.has('KeyX');
 
   kb.forward = axis(down, up);
   kb.strafe = axis(left, right);

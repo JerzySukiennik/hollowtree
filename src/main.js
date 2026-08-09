@@ -237,6 +237,18 @@ async function boot() {
 
   initInput(canvas);
 
+  // A browser will not let a page swallow Ctrl+W, and it never will -- closing the tab
+  // belongs to the user, not to us. What a page *may* do is ask first, and that is enough
+  // to save a flight that was ended by a fumbled key rather than a decision. It only arms
+  // itself once the player is actually in the world, so nobody is nagged on the menu.
+  window.addEventListener('beforeunload', (event) => {
+    if (mode !== 'play') return;
+    event.preventDefault();
+    // Chrome ignores the string and shows its own wording; assigning it is still what
+    // triggers the prompt in older engines.
+    event.returnValue = '';
+  });
+
   // Declared before the systems that read the clock: weather samples it while it is
   // being constructed, so `net` must already exist as a binding even when it is null.
   let net = null;
