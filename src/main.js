@@ -18,6 +18,7 @@ import { createBuildMode } from './nest/build-mode.js';
 import { createBuildPanel } from './ui/build-panel.js';
 import { createGuidance } from './ui/guidance.js';
 import { createSwarm } from './entities/swarm.js';
+import { createRevive } from './systems/revive.js';
 import { createHornets } from './entities/hornets.js';
 import { createZones } from './world/zones.js';
 
@@ -289,6 +290,7 @@ async function boot() {
   let build = null;
   let swarm = null;
   let hornets = null;
+  let revive = null;
   let zones = null;
   // A transient line in the game HUD. gameHud.setPrompt() is a persistent override, so
   // the timer is what makes this a notice rather than a permanent label.
@@ -305,6 +307,13 @@ async function boot() {
 
   if (interior) {
     comb = createComb({ interior, resources, audio });
+    revive = createRevive({
+      comb,
+      grid: interior.grid,
+      spec: interior.spec,
+      flight,
+      uid: () => (net && net.uid) || 'local',
+    });
     buildPanel = createBuildPanel({ onSelect: (id) => build && build.selectType(id) });
     build = createBuildMode({
       comb,
@@ -334,13 +343,11 @@ async function boot() {
       }
     });
     hornets.onContact(() => {
-      // The queen is never hurt: she drops what she carries and is sent home.
+      // The queen is never hurt: she drops what she carries and is sent home. Where home is
+      // now depends on whether anyone in the hive has built a queen's chamber -- that is the
+      // whole point of the cell -- and she flies out of it shaken for a few seconds.
       if (gather && typeof gather.dropLoad === 'function') gather.dropLoad();
-      const spec = interior && interior.spec;
-      if (spec && flight && flight.simPosition) {
-        flight.simPosition.set(spec.centerX, spec.entranceY, spec.centerZ);
-        flight.velocity.set(0, 0, 0);
-      }
+      if (revive) revive.revive();
     });
   }
 
@@ -706,6 +713,7 @@ async function boot() {
     get netInfo() { return netInfo; },
     get remotes() { return remotes; },
     swarm, hornets, zones,
+    get revive() { return revive; },
     nest: interior ? { interior, portal, grid: interior.grid, spec: interior.spec, comb, build } : null,
   };
 

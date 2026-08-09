@@ -71,6 +71,9 @@ export function createFlight(terrain) {
   let pitchVel = 0;
   let boostAmount = 0;
   let boostSurge = 0;
+  // 1 = whole, below 1 = shaken. Recovers on its own; nothing else may hold it down.
+  let weakness = 1;
+  let weakRecoverPerSec = 0;
   let liftDrive = 0;
   let fwdDrive = 0;
   let strafeDrive = 0;
@@ -165,6 +168,18 @@ export function createFlight(terrain) {
     velocity,
     acceleration,
     simPosition: base,
+    weakness: 1,
+    // Knock her down to `factor` of her usual speed, recovering evenly over `seconds`.
+    // Returns nothing to wait on: control is never taken away, so there is nothing to
+    // hand back. A second hit while still shaken deepens it rather than resetting the
+    // clock, so being caught twice is worse than once without ever being a stun.
+    shake(factor, seconds) {
+      const f = Math.max(0.05, Math.min(1, Number(factor) || 1));
+      const t = Math.max(0.1, Number(seconds) || 1);
+      weakness = Math.min(weakness, f);
+      weakRecoverPerSec = (1 - weakness) / t;
+      return weakness;
+    },
     bank: 0,
     pitch: 0,
     yawRate: 0,
@@ -237,10 +252,15 @@ export function createFlight(terrain) {
     }
     boostSurge *= damp(FLIGHT.boostSurgeDecay, dt);
 
-    const maxSpeed = MathUtils.lerp(FLIGHT.maxSpeed, FLIGHT.boostSpeed, boostAmount);
+    // A shaken queen flies slower, never less responsively. `weakness` scales the ceiling
+    // and the push, and deliberately touches neither the turn rate nor the input read: she
+    // answers the stick on the frame after a hornet as she did on the frame before, which
+    // is the whole difference between a moment of weakness and a punishment.
+    const weak = weakness < 1 ? weakness : 1;
+    const maxSpeed = MathUtils.lerp(FLIGHT.maxSpeed, FLIGHT.boostSpeed, boostAmount) * weak;
     const accelBase =
       MathUtils.lerp(FLIGHT.accel, FLIGHT.boostAccel, boostAmount) *
-      (1 + boostSurge * (FLIGHT.boostSurge - 1));
+      (1 + boostSurge * (FLIGHT.boostSurge - 1)) * weak;
 
     _fwd.set(-Math.sin(yawRef), 0, -Math.cos(yawRef));
     _right.set(Math.cos(yawRef), 0, -Math.sin(yawRef));
@@ -424,7 +444,11 @@ export function createFlight(terrain) {
     state.speed = velocity.length();
     state.planarSpeed = planar;
     state.speedRatio = speedRatio;
+    if (weakness < 1) {
+      weakness = Math.min(1, weakness + weakRecoverPerSec * dt);
+    }
     state.boostAmount = boostAmount;
+    state.weakness = weakness;
     state.hoverFactor = hoverFactor;
     state.bob = bobOffset;
     state.grounded = grounded;
