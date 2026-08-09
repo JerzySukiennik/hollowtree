@@ -43,15 +43,46 @@ export function createEmitter(ctx, library, sfxBus, musicBus, camera) {
     return { gain: clamp(gain, 0, 1), pan: pan * clamp(distance / ref, 0, 1) };
   }
 
+  // Two cheap guards so the calm mix survives a loop that now speaks on every action.
+  //
+  // `recent` is a per-id floor on repeats: a caller passing `minGap` cannot restart the
+  // same cue sooner than that, which makes "one sound per event" a property of the mixer
+  // rather than a promise each call site has to keep.
+  //
+  // `lastShot` is the give-way rule. When two one-shots land inside the same handful of
+  // milliseconds the later one is pulled down unless it is genuinely more important —
+  // a scoop landing on the exact frame the baskets fill should not double the level, it
+  // should step aside and let the fuller cue read.
+  const recent = new Map();
+  const lastShot = { at: -1e9, priority: 0 };
+  const GIVE_WAY_WINDOW = 0.06;
+
   function play(id, options) {
     const opts = options || {};
     const spec = AUDIO.oneShots[id];
     const bufferId = spec ? spec.id : id;
+    const now = ctx.currentTime;
+
+    const minGap = opts.minGap || 0;
+    if (minGap > 0) {
+      const prev = recent.get(id);
+      if (prev !== undefined && now - prev < minGap) return null;
+    }
+
     const buffer = library.get(bufferId);
     if (!buffer) {
       library.load(bufferId);
       return null;
     }
+
+    // Priority is opt-in: existing call sites pass nothing and keep their old level.
+    let giveWay = 1;
+    const priority = opts.priority || 0;
+    if (priority > 0 && now - lastShot.at < GIVE_WAY_WINDOW) {
+      if (priority < lastShot.priority) giveWay = 0.35;
+      else if (priority === lastShot.priority) giveWay = 0.55;
+    }
+
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     const spread = spec ? spec.spread : 0.04;
@@ -62,7 +93,7 @@ export function createEmitter(ctx, library, sfxBus, musicBus, camera) {
     const gain = ctx.createGain();
     const place = spatial(opts.position);
     const base = spec ? spec.gain : 1;
-    gain.gain.value = Math.max(0, base * (opts.volume === undefined ? 1 : opts.volume) * place.gain);
+    gain.gain.value = Math.max(0, base * (opts.volume === undefined ? 1 : opts.volume) * place.gain * giveWay);
 
     const chain = [gain];
     let tail = gain;
@@ -92,12 +123,15 @@ export function createEmitter(ctx, library, sfxBus, musicBus, camera) {
         /* already gone */
       }
     };
-    const when = ctx.currentTime + Math.max(0, opts.delay || 0);
+    const when = now + Math.max(0, opts.delay || 0);
     try {
       source.start(when, Math.max(0, opts.offset || 0));
     } catch (error) {
       return null;
     }
+    recent.set(id, now);
+    lastShot.at = now;
+    lastShot.priority = Math.max(1, priority);
     return source;
   }
 

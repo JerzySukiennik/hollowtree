@@ -1,4 +1,15 @@
-// Hollowtree — gameplay overlay: basket meter, resource bank and the contextual prompt, kept off the meadow when idle.
+// Hollowtree — gameplay overlay: the carrying meter and the resource bank. Nothing else.
+//
+// This layer used to also own a contextual prompt ("hold E to gather", "gathering",
+// "baskets full — fly home") and a per-flower depletion meter. Both are gone. The prompt
+// was a running commentary on state the player could already see, and it was the second
+// place on screen saying what to do next; there is now exactly one such place, the single
+// adaptive line in ui/guidance.js. The bloom meter named the flower under the queen's nose
+// and drew a bar for a number she had no decision to make about.
+//
+// setPrompt() survives as the transient-notice channel main.js already calls ("fly inside
+// the hollow to build"). It no longer draws anything here — it parks the text on `notice`,
+// and the guidance line, which owns the only sentence on screen, prints it.
 
 import { HUD, GATHER } from '../config.js';
 
@@ -26,19 +37,11 @@ color:${HUD.colors.dim};text-shadow:0 1px 3px rgba(0,0,0,.55)}
 
 .ht-center{position:absolute;left:50%;bottom:92px;transform:translateX(-50%);
 display:flex;flex-direction:column;align-items:center;gap:9px;width:280px}
-.ht-prompt{height:16px;position:relative;width:100%;display:flex;justify-content:center}
-.ht-prompt span{position:absolute;white-space:nowrap;font-size:11px;letter-spacing:.19em;
-text-transform:uppercase;text-shadow:0 1px 5px rgba(0,0,0,.75);
-transition:opacity .28s ease,transform .28s cubic-bezier(.22,.61,.36,1)}
-.ht-prompt span.out{opacity:0;transform:translateY(5px)}
-.ht-prompt span em{font-style:normal;color:${HUD.colors.pollen}}
 
 .ht-basket{width:100%;display:flex;flex-direction:column;gap:6px;
 opacity:0;transform:translateY(6px);transition:opacity .35s ease,transform .35s cubic-bezier(.22,.61,.36,1)}
 .ht-basket.is-on{opacity:1;transform:none}
 .ht-basket-head{display:flex;justify-content:space-between;align-items:baseline}
-.ht-basket-value{font-size:10.5px;letter-spacing:.1em;color:${HUD.colors.text};
-text-shadow:0 1px 3px rgba(0,0,0,.6);opacity:.82}
 .ht-track{position:relative;height:4px;border-radius:3px;overflow:hidden;
 background:rgba(255,255,255,.15);box-shadow:0 1px 2px rgba(0,0,0,.4),inset 0 0 0 .5px rgba(255,255,255,.1)}
 .ht-fill{position:absolute;inset:0;width:0;border-radius:3px;transform-origin:left center;
@@ -51,13 +54,6 @@ background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent)}
 box-shadow:0 0 14px rgba(255,224,160,.75)}
 .ht-basket.is-full .ht-track{box-shadow:0 0 0 1px rgba(255,224,160,.35),0 1px 2px rgba(0,0,0,.4)}
 @keyframes ht-sweep{from{transform:translateX(-120%)}to{transform:translateX(400%)}}
-
-.ht-bloom{display:flex;align-items:center;gap:7px;height:11px;opacity:0;
-transition:opacity .3s ease}
-.ht-bloom.is-on{opacity:1}
-.ht-bloom-name{font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:${HUD.colors.dim}}
-.ht-bloom-track{width:46px;height:2px;border-radius:2px;background:rgba(255,255,255,.16);overflow:hidden}
-.ht-bloom-fill{height:100%;width:0;border-radius:2px;background:${HUD.colors.pollen};opacity:.8}
 
 .ht-bank{position:absolute;right:26px;bottom:26px;display:flex;flex-direction:column;
 align-items:flex-end;gap:7px}
@@ -93,9 +89,6 @@ export function createHud() {
   el('div', 'ht-scrim', root);
 
   const center = el('div', 'ht-center', root);
-  const prompt = el('div', 'ht-prompt', center);
-  const promptA = el('span', 'out', prompt);
-  const promptB = el('span', 'out', prompt);
 
   const basket = el('div', 'ht-basket', center);
   const head = el('div', 'ht-basket-head', basket);
@@ -103,17 +96,15 @@ export function createHud() {
   // "baskets" is beekeeping, not English: it is the pollen basket on a bee's leg, and a
   // first-time player reads it as a container they are supposed to find somewhere.
   // The bar is how full the queen herself is, so that is what it now says.
+  //
+  // The "42% full" readout that used to sit at the other end of this row is gone: the bar
+  // beside it was already drawing that exact number, and a percentage is not a figure the
+  // player ever acts on to two significant digits. Being full is signalled by the bar's own
+  // is-full treatment and, once, by the guidance line.
   headLabel.textContent = 'carrying';
-  const headValue = el('div', 'ht-basket-value', head);
-  headValue.textContent = '0% full';
   const track = el('div', 'ht-track', basket);
   const fill = el('div', 'ht-fill', track);
   el('div', 'ht-sheen', track);
-
-  const bloom = el('div', 'ht-bloom', center);
-  const bloomName = el('div', 'ht-bloom-name', bloom);
-  const bloomTrack = el('div', 'ht-bloom-track', bloom);
-  const bloomFill = el('div', 'ht-bloom-fill', bloomTrack);
 
   const bank = el('div', 'ht-bank', root);
   const rows = [];
@@ -138,35 +129,14 @@ export function createHud() {
   let visible = false;
   let idle = 0;
   let barShown = 0;
-  let bloomShown = 0;
-  let front = promptA;
-  let back = promptB;
-  let currentText = '';
-  let override = null;
-
-  function swapPrompt(text) {
-    if (text === currentText) return;
-    currentText = text;
-    const next = back;
-    back = front;
-    front = next;
-    back.classList.add('out');
-    if (!text) return;
-    front.innerHTML = text;
-    front.classList.add('out');
-    void front.offsetWidth;
-    front.classList.remove('out');
-  }
+  // The transient notice channel. main.js still calls setPrompt() for refusals such as
+  // "fly inside the hollow to build"; it is read by ui/guidance.js, which owns the one
+  // sentence on screen, so a notice replaces the objective for its moment rather than
+  // opening a second line beside it.
+  let notice = null;
 
   function setPrompt(text) {
-    override = text || null;
-  }
-
-  function copyFor(hint) {
-    if (!hint) return '';
-    const text = HUD.copy[hint];
-    if (!text) return '';
-    return text.replace(/\bE\b/, '<em>E</em>');
+    notice = text || null;
   }
 
   function update(dt, model) {
@@ -181,23 +151,11 @@ export function createHud() {
     const kb = 1 - Math.exp(-HUD.barResponse * step);
     barShown += (fillTarget - barShown) * kb;
     fill.style.width = `${(barShown * 100).toFixed(2)}%`;
-    headValue.textContent = `${Math.round(barShown * 100)}% full`;
 
     const showBar = fillTarget > 0.001 || g.active || g.nearFlower;
     basket.classList.toggle('is-on', Boolean(showBar));
     basket.classList.toggle('is-active', Boolean(g.active));
     basket.classList.toggle('is-full', Boolean(g.full));
-
-    const target = g.target;
-    const showBloom = Boolean(target) && Boolean(g.nearFlower);
-    bloom.classList.toggle('is-on', showBloom);
-    if (showBloom) {
-      if (bloomName.textContent !== target.species.name) bloomName.textContent = target.species.name;
-      bloomShown += ((target.ratio || 0) - bloomShown) * kb;
-    } else {
-      bloomShown += (0 - bloomShown) * kb;
-    }
-    bloomFill.style.width = `${(bloomShown * 100).toFixed(1)}%`;
 
     const caps = model.capacity || null;
     for (const row of rows) {
@@ -232,10 +190,10 @@ export function createHud() {
       }
     }
 
-    const hint = override || copyFor(g.hint);
-    swapPrompt(hint);
-
-    const busy = Boolean(hint) || showBar || (g.load || 0) > 0.001;
+    // Idle now means "the queen is carrying nothing and is nowhere near a flower". It used
+    // to also count a live prompt, which is why the bank stayed lit while a line of text
+    // narrated the obvious; the text is gone, so the bank fades whenever it has no news.
+    const busy = showBar || (g.load || 0) > 0.001;
     idle = busy ? 0 : idle + step;
     const wanted = busy || idle < HUD.idleHideDelay;
     if (wanted !== visible) {
@@ -248,6 +206,9 @@ export function createHud() {
     root,
     update,
     setPrompt,
+    // Read by ui/guidance.js. A notice outranks the objective for as long as main.js keeps
+    // it set, which is what makes a refusal feel like an answer rather than a second voice.
+    get notice() { return notice; },
     dispose() {
       root.remove();
       style.remove();

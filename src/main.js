@@ -16,6 +16,7 @@ import { seasonAt } from './net/offline.js';
 import { createComb } from './nest/comb.js';
 import { createBuildMode } from './nest/build-mode.js';
 import { createBuildPanel } from './ui/build-panel.js';
+import { createGuidance } from './ui/guidance.js';
 import { createSwarm } from './entities/swarm.js';
 import { createHornets } from './entities/hornets.js';
 import { createZones } from './world/zones.js';
@@ -166,28 +167,6 @@ function createHud() {
   return el;
 }
 
-function createHint() {
-  const el = document.createElement('div');
-  el.textContent = 'click to fly';
-  el.style.cssText = [
-    'position:fixed',
-    'left:50%',
-    'bottom:44px',
-    'transform:translateX(-50%)',
-    'z-index:5',
-    'pointer-events:none',
-    'font-size:12px',
-    'letter-spacing:.18em',
-    'text-transform:uppercase',
-    'color:#f6e9cf',
-    'text-shadow:0 1px 4px rgba(0,0,0,.8)',
-    'transition:opacity .45s ease',
-    'opacity:0',
-  ].join(';');
-  document.body.appendChild(el);
-  return el;
-}
-
 async function boot() {
   const assets = await loadAssets(setProgress);
 
@@ -243,6 +222,7 @@ async function boot() {
   const resources = createResources();
   const gather = flowers && hive ? createGather(flowers, resources, flight, hive) : null;
   const gameHud = createGameHud();
+  const guidance = createGuidance();
 
   let post = null;
   try {
@@ -290,11 +270,7 @@ async function boot() {
     });
     audio.setWeather(weather.state);
   }
-  if (gather && typeof gather.onDeposit === 'function') {
-    gather.onDeposit((event) => audio.play('deposit', {
-      volume: Math.min(1, 0.6 + ((event && event.total) || 0) / 200),
-    }));
-  }
+  if (gather && typeof gather.attachAudio === 'function') gather.attachAudio(audio);
 
   let comb = null;
   let buildPanel = null;
@@ -357,7 +333,6 @@ async function boot() {
   }
 
   const hud = createHud();
-  const hint = createHint();
   let hudVisible = false;
   let hudTimer = 0;
 
@@ -539,7 +514,6 @@ async function boot() {
     camera.fov = CAMERA.fov;
     camera.updateProjectionMatrix();
     mode = 'play';
-    hint.style.opacity = DEV.hintOpacity;
   }
 
   function openLobby(context) {
@@ -660,6 +634,9 @@ async function boot() {
       });
     }
 
+    // Runs in every mode: it reads window.hollowtree and hides itself outside play.
+    guidance.update(dt);
+
     audio.update(dt, {
       insideness: portal ? portal.state.insideness : 0,
       speed: typeof flight.speed === 'number' ? flight.speed : flight.velocity.length(),
@@ -687,7 +664,6 @@ async function boot() {
       renderer.render(scene, camera);
     }
 
-    hint.style.opacity = mode !== 'play' || input.pointerLocked ? 0 : DEV.hintOpacity;
 
     if (!hudVisible) return;
     hudTimer += dt;
@@ -725,7 +701,6 @@ async function boot() {
   updateMenuCamera(0, 0);
   renderer.render(scene, camera);
   if (loadingEl) loadingEl.classList.add('hidden');
-  hint.style.opacity = 0;
   menu.show();
 
   loop.start();

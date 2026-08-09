@@ -28,6 +28,8 @@ function silentAudio() {
     setVolumes: (next) => Object.assign(volumes, next || {}),
     volumes,
     setHornets: noop,
+    setGatherTone: noop,
+    releaseGather: noop,
     dispose: noop,
     weather: { kind: 'clear', intensity: 0, wetness: 0, damp: 0, wind: 0, driven: false },
     available: false,
@@ -73,6 +75,11 @@ export function createAudio(camera) {
     enteredHollow: false,
     lastSeason: null,
     musicDuck: 1,
+    // How rich the thing being drawn from still is, 1 = brimming, 0 = all but spent.
+    // The loop's level, brightness and pitch all lean on it, so a flower running out
+    // is audible before the HUD number is read.
+    gatherTone: 1,
+    gatherToneTarget: 1,
   };
 
   let resolveReady = noop;
@@ -132,6 +139,24 @@ export function createAudio(camera) {
     weather.setWeather(next);
   }
 
+  // Called by the gathering system each step while it holds a target. The loop's own
+  // level still follows the charge that main.js feeds into update(); this only colours
+  // it, so nothing here can make a sound start that the charge has not already asked for.
+  function setGatherTone(value) {
+    const v = typeof value === 'number' && isFinite(value) ? value : 1;
+    state.gatherToneTarget = v < 0 ? 0 : v > 1 ? 1 : v;
+  }
+
+  // Let go, or the flower gave its last: cut the loop rather than let it ring out over
+  // the silence where the answer should be. The charge is already falling — this just
+  // stops the smoothed level from lagging a third of a second behind it.
+  function releaseGather() {
+    if (state.gathering > 0.06) state.gathering = 0.06;
+    gather.setTarget(0);
+    state.gatherTone = 1;
+    state.gatherToneTarget = 1;
+  }
+
   function thunder(distanceMeters) {
     weather.setDriven();
     if (!state.unlocked) return null;
@@ -181,11 +206,20 @@ export function createAudio(camera) {
     const tau = wants > state.gathering ? AUDIO.gather.rise : AUDIO.gather.fall;
     state.gathering += (wants - state.gathering) * (1 - Math.exp(-step / tau));
     if (state.gathering < 0.001) state.gathering = 0;
-    gather.setTarget(state.gathering * AUDIO.gather.gain);
-    gather.setCutoff(
-      AUDIO.gather.cutoffLow + (AUDIO.gather.cutoffHigh - AUDIO.gather.cutoffLow) * state.gathering
-    );
-    gather.setRate(AUDIO.gather.rateLow + (AUDIO.gather.rateHigh - AUDIO.gather.rateLow) * state.gathering);
+
+    // Tone glides rather than steps: the reserve falls continuously, so hearing it fall
+    // continuously is the honest reading. 0.35 s is slow enough not to chatter on a
+    // flower two queens are sharing, fast enough to land before the flower empties.
+    state.gatherTone += (state.gatherToneTarget - state.gatherTone) * (1 - Math.exp(-step / 0.35));
+    const tone = state.gatherTone;
+
+    gather.setTarget(state.gathering * AUDIO.gather.gain * (0.52 + 0.48 * tone));
+    const cutoff =
+      AUDIO.gather.cutoffLow + (AUDIO.gather.cutoffHigh - AUDIO.gather.cutoffLow) * state.gathering;
+    gather.setCutoff(cutoff * (0.55 + 0.45 * tone));
+    const rate =
+      AUDIO.gather.rateLow + (AUDIO.gather.rateHigh - AUDIO.gather.rateLow) * state.gathering;
+    gather.setRate(rate * (0.94 + 0.06 * tone));
     gather.update(step, 0.12);
 
     state.hornetLevel += (state.hornetTarget - state.hornetLevel) * (1 - Math.exp(-step / AUDIO.hornet.glide));
@@ -234,6 +268,8 @@ export function createAudio(camera) {
     setVolumes,
     volumes,
     setHornets,
+    setGatherTone,
+    releaseGather,
     dispose,
     weather: weather.state,
     available: true,
