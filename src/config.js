@@ -1082,6 +1082,24 @@ export const POST = {
     insideTint: 0xffc98a,
     seasonTint: 0xffffff,
     seasonMix: 0.0,
+    // Four palettes for the four seasons of NET.season.names, in that order. These multiply
+    // the graded image, so they read as light falling on the meadow rather than as a filter
+    // laid over it: spring cool and green, summer neutral and bright, autumn warm and dry,
+    // prewinter pale and blue.
+    //
+    // The strength is deliberately small. A season is two real days, so this colour is the
+    // room the player lives in for a whole weekend -- strong enough to name at a glance
+    // beside another season, never strong enough to fight the flowers for attention.
+    seasonPalettes: [
+      { tint: 0xb6f0a0, mix: 0.34 },   // spring — cool, green, new
+      { tint: 0xffe9a8, mix: 0.24 },   // summer — bright and golden
+      { tint: 0xff9f52, mix: 0.44 },   // autumn — warm and dry
+      { tint: 0x92b8f0, mix: 0.46 },   // prewinter — pale, blue, thin light
+    ],
+    // What share of a season is spent turning into the next one. The rest sits at its own
+    // colour, so the four are distinguishable; without this the palette would be in
+    // permanent motion and no season would ever look like itself.
+    seasonBlendShare: 0.22,
   },
 };
 

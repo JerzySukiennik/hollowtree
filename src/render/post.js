@@ -387,6 +387,7 @@ export function createPost(renderer, scene, camera) {
 
   const insideTint = hexToVec3(POST.grade.insideTint, new Vector3());
   const seasonTint = hexToVec3(POST.grade.seasonTint, new Vector3());
+  const _seasonNext = new Vector3();
   const prevViewProj = new Matrix4();
   const viewProj = new Matrix4();
   const prevCamPos = new Vector3().copy(camera.position);
@@ -704,6 +705,37 @@ export function createPost(renderer, scene, camera) {
     setSeason(tint, mix) {
       if (tint !== undefined) hexToVec3(tint, seasonTint);
       if (typeof mix === 'number') POST.grade.seasonMix = mix;
+    },
+    // Drive the grade from the world calendar. `index` is the season, `t` how far through
+    // it we are, 0..1 -- exactly what seasonAt() returns, so nothing has to be accumulated
+    // and a client that joins mid-year lands on the same colour as everyone else.
+    //
+    // The blend is held off until the last stretch of each season so the four palettes are
+    // actually distinguishable; a straight lerp across the whole season would mean the
+    // meadow is always halfway between two colours and never wearing one.
+    setSeasonPhase(index, t) {
+      const palettes = POST.grade.seasonPalettes;
+      if (!palettes || !palettes.length) return;
+      const n = palettes.length;
+      const here = palettes[((index | 0) % n + n) % n];
+      const next = palettes[(((index | 0) + 1) % n + n) % n];
+      const share = POST.grade.seasonBlendShare || 0;
+      const phase = Math.max(0, Math.min(1, Number(t) || 0));
+      const k = share > 0 && phase > 1 - share ? (phase - (1 - share)) / share : 0;
+      // Smoothstep so neither end of the handover has a visible corner.
+      const blend = k * k * (3 - 2 * k);
+      hexToVec3(here.tint, seasonTint);
+      hexToVec3(next.tint, _seasonNext);
+      seasonTint.lerp(_seasonNext, blend);
+      POST.grade.seasonMix = here.mix + (next.mix - here.mix) * blend;
+    },
+    // Probe window on the season grade: the tint actually in the uniform and the strength
+    // it is applied at, so the handover can be checked for a step rather than eyeballed.
+    gradeDebug() {
+      return {
+        tint: [seasonTint.x, seasonTint.y, seasonTint.z],
+        mix: POST.grade.seasonMix,
+      };
     },
     setTier(value) {
       tier = MathUtils.clamp(value, 0, tierCount - 1);

@@ -644,6 +644,13 @@ async function boot() {
       if (window.hollowtree) window.hollowtree.season = season.name;
     }
 
+    // The calendar reaches the meadow. seasonAt() already hands back the index and how far
+    // through the season we are, so nothing is accumulated here and a player joining
+    // mid-year sees exactly the colour everyone else does.
+    if (season && post && typeof post.setSeasonPhase === 'function') {
+      post.setSeasonPhase(season.index, season.t);
+    }
+
     if (gather && mode === 'play') {
       const bank = bankSnapshot || resources.snapshot();
       gameHud.update(dt, {
