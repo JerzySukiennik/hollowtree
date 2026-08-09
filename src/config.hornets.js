@@ -104,9 +104,11 @@ export const HORNETS = {
   },
 
   render: {
-    bodyLength: 0.62,
-    bodyRadius: 0.17,
-    wingSpan: 0.72,
+    // Bigger than a worker by a clear margin -- the size difference is half of what makes
+    // it read as a threat rather than a stray bee.
+    bodyLength: 0.86,
+    bodyRadius: 0.21,
+    wingSpan: 0.98,
     swirlAmp: 1.35,
     swirlFreq: [1.7, 2.3, 1.1],
     circleRadius: 4.2,
@@ -114,9 +116,11 @@ export const HORNETS = {
     circleSpeed: 0.85,
     approachEase: 2.0,
     colors: {
-      dark: 0x241a12,
-      amber: 0xd8a12c,
-      head: 0x120d09,
+      // Darker than before: against a green meadow and a brown trunk this is what makes
+      // the outline hold together at distance instead of dissolving into the background.
+      dark: 0x140d07,
+      amber: 0xc07a14,
+      head: 0x0a0704,
       wing: 0xd9dbc9,
       wingAlpha: 0.5,
     },

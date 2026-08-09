@@ -254,10 +254,10 @@ export function createHornets({ scene, terrain, comb, net, flight, entrance } = 
   group.visible = false;
 
   const bodyGeo = makeBodyGeometry(R);
-  const abdomenGeo = new THREE.SphereGeometry(R.bodyRadius * 1.02, 7, 5);
-  abdomenGeo.scale(1, 0.86, 1.55);
-  const wingGeo = new THREE.PlaneGeometry(R.wingSpan * 0.5, R.wingSpan * 0.22);
-  wingGeo.translate(R.wingSpan * 0.25, 0, 0);
+  const abdomenGeo = makeAbdomenGeometry(R);
+  // Longer and narrower than a bee's stub of a wing, so even the blur reads differently.
+  const wingGeo = new THREE.PlaneGeometry(R.wingSpan * 0.62, R.wingSpan * 0.16);
+  wingGeo.translate(R.wingSpan * 0.31, 0, 0);
 
   const bodyMat = new THREE.MeshLambertMaterial({ color: R.colors.dark });
   const abdomenMat = new THREE.MeshLambertMaterial({ color: R.colors.amber });
@@ -773,9 +773,85 @@ export function createHornets({ scene, terrain, comb, net, flight, entrance } = 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 function ease(u, k) { return 1 - Math.pow(1 - clamp01(u), k); }
 
+// A hornet has to be readable at twenty metres as NOT A BEE, and the only thing that
+// carries that far is outline. A bee here is three soft spheres: round head, round thorax,
+// round abdomen. So the hornet is built out of the opposite -- a wide flat head with two
+// forward mandibles, a waist that pinches, and a long abdomen that ends in a point.
+//
+// Merged into one geometry rather than parented meshes, because the instancing code above
+// draws each hornet as exactly three instances (body, abdomen, wings) and adding a fourth
+// mesh would cost a draw call per part for the whole raid.
+function mergeInto(parts) {
+  const positions = [];
+  const normals = [];
+  const nm = new THREE.Matrix4();
+  const v = new THREE.Vector3();
+  for (const [geo, matrix] of parts) {
+    const src = geo.index ? geo.toNonIndexed() : geo;
+    const pos = src.getAttribute('position');
+    const nrm = src.getAttribute('normal');
+    nm.extractRotation(matrix);
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(matrix);
+      positions.push(v.x, v.y, v.z);
+      v.fromBufferAttribute(nrm, i).applyMatrix4(nm).normalize();
+      normals.push(v.x, v.y, v.z);
+    }
+    if (src !== geo) src.dispose();
+    geo.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normals), 3));
+  out.computeBoundingSphere();
+  return out;
+}
+
 function makeBodyGeometry(R) {
-  const g = typeof THREE.CapsuleGeometry === 'function'
-    ? new THREE.CapsuleGeometry(R.bodyRadius, R.bodyLength * 0.6, 3, 7)
-    : new THREE.CylinderGeometry(R.bodyRadius, R.bodyRadius * 0.8, R.bodyLength, 7, 1);
-  return g;
+  const r = R.bodyRadius;
+  const m = new THREE.Matrix4();
+  const parts = [];
+
+  // Thorax: squared off rather than round, and wider than it is tall.
+  const thorax = new THREE.CylinderGeometry(r * 1.15, r * 0.92, R.bodyLength * 0.62, 6, 1);
+  thorax.rotateX(Math.PI / 2);
+  thorax.scale(1.25, 0.82, 1);
+  parts.push([thorax, m.clone().identity()]);
+
+  // Head: a flat wedge, not a ball. Forward is -Z, matching the bee and the wing code.
+  const head = new THREE.CylinderGeometry(r * 1.08, r * 0.72, r * 1.1, 6, 1);
+  head.rotateX(Math.PI / 2);
+  head.scale(1.35, 0.7, 1);
+  parts.push([head, m.clone().makeTranslation(0, 0.01, -R.bodyLength * 0.42)]);
+
+  // Mandibles: the one detail that reads as menace at distance, because they break the
+  // silhouette forward of the head where a bee has nothing at all.
+  for (const side of [-1, 1]) {
+    const jaw = new THREE.ConeGeometry(r * 0.3, r * 1.5, 4);
+    jaw.rotateX(-Math.PI / 2);
+    const t = new THREE.Matrix4().makeRotationY(side * 0.34);
+    t.setPosition(side * r * 0.5, -r * 0.12, -R.bodyLength * 0.62);
+    parts.push([jaw, t]);
+  }
+
+  return mergeInto(parts);
+}
+
+// The abdomen: long, tapered, and finished with a sting. A bee's abdomen is an ellipsoid
+// that stops; this one comes to a point, which is the whole idea.
+function makeAbdomenGeometry(R) {
+  const r = R.bodyRadius;
+  const m = new THREE.Matrix4();
+  const parts = [];
+
+  const barrel = new THREE.CylinderGeometry(r * 1.05, r * 0.55, R.bodyLength * 1.05, 6, 1);
+  barrel.rotateX(Math.PI / 2);
+  barrel.scale(1, 0.88, 1);
+  parts.push([barrel, m.clone().makeTranslation(0, 0, R.bodyLength * 0.52)]);
+
+  const sting = new THREE.ConeGeometry(r * 0.4, R.bodyLength * 0.5, 5);
+  sting.rotateX(Math.PI / 2);
+  parts.push([sting, m.clone().makeTranslation(0, 0, R.bodyLength * 1.3)]);
+
+  return mergeInto(parts);
 }
