@@ -1,0 +1,18 @@
+.DS_Store
+Niepotrzebne/
+.env
+*.blend1
+
+# Kenney input-prompt sheets: 21 MB, not referenced by any code yet. Re-add the
+# specific sprites when the UI needs them instead of shipping the whole pack.
+assets/ui/inputprompts/
+
+# Trailer render pipeline: puppeteer and its Chromium, plus rendered frames.
+# 29 MB of dependencies and thousands of intermediate PNGs — the pipeline is
+# reproducible from work/trailer/package.json, the artefacts are not source.
+work/trailer/node_modules/
+work/trailer/frames/
+work/trailer/out/
+work/trailer/shots/
+work/trailer/*.mp4
+work/trailer/tmp/

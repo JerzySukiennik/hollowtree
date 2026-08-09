@@ -826,7 +826,10 @@ export const INTERIOR = {
 export const COMB = {
   cellWidth: 1.0,
   cellDepth: 0.55,
-  layers: 4,
+  // One skin, not four. Stacking cells outward from the wall was reachable — aiming at a
+  // finished cell targeted the layer behind it — and it read as combs sitting on top of each
+  // other, which is not what a comb is. The lattice is now a single course on the wall face.
+  layers: 1,
   rowPad: 1.2,
   wallOffset: 0.12,
   entranceClear: 1.6,

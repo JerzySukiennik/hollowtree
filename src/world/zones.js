@@ -8,6 +8,8 @@ const BANDS = ZONES.bands;
 const B = ZONES.barrier;
 const CX = ZONES.center.x;
 const CZ = ZONES.center.z;
+// Eye height for a queen on the wing, a little above the meadow so the sign clears the grass.
+const SIGN_HEIGHT = 18;
 
 export function distanceFromCenter(x, z) {
   const dx = x - CX;
@@ -94,13 +96,68 @@ export function createZones(scene, options) {
   const opts = options || {};
   const baseRadius = 100;
   const geometry = new THREE.CylinderGeometry(baseRadius, baseRadius, B.fogHeight, B.segments, 1, true);
-  const material = new THREE.MeshBasicMaterial({
-    color: B.fogColor,
+  // The barrier used to be a flat translucent cylinder and it read as a pane of glass with a
+  // hard vertical seam wherever the curve turned away from the camera — so its rendering was
+  // switched off entirely and the player was left being shoved by something invisible. The
+  // master prompt is explicit that a locked border is fog, never a wall, so this is fog: it
+  // dies at the top and bottom, dies again wherever you see it edge-on (which is what kills
+  // the seam), and only exists at all when you are close enough to be turned back by it.
+  const material = new THREE.ShaderMaterial({
     transparent: true,
-    opacity: B.fogOpacity,
-    side: THREE.DoubleSide,
     depthWrite: false,
-    alphaMap: fogTexture(),
+    side: THREE.DoubleSide,
+    blending: THREE.NormalBlending,
+    uniforms: {
+      uColor: { value: new THREE.Color(B.fogColor) },
+      uOpacity: { value: B.fogOpacity },
+      uTime: { value: 0 },
+      uNear: { value: 0 },      // how close the queen is, 0 = far away, 1 = at the line
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vWorld;
+      varying vec3 vNormalW;
+      void main() {
+        vUv = uv;
+        vec4 world = modelMatrix * vec4(position, 1.0);
+        vWorld = world.xyz;
+        vNormalW = normalize(mat3(modelMatrix) * normal);
+        gl_Position = projectionMatrix * viewMatrix * world;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      uniform float uTime;
+      uniform float uNear;
+      varying vec2 vUv;
+      varying vec3 vWorld;
+      varying vec3 vNormalW;
+
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+      float noise(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i), hash(i + vec2(1,0)), f.x),
+                   mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x), f.y);
+      }
+
+      void main() {
+        // Vertical: nothing at the ground, nothing at the top, a soft band between.
+        float band = smoothstep(0.0, 0.28, vUv.y) * (1.0 - smoothstep(0.55, 1.0, vUv.y));
+
+        // Edge-on: the seam was the cylinder's silhouette. Fade it out exactly there.
+        vec3 view = normalize(cameraPosition - vWorld);
+        float facing = abs(dot(view, vNormalW));
+        float rim = smoothstep(0.05, 0.55, facing);
+
+        // Drifting cloud, two octaves, so it never reads as a flat sheet.
+        float n = noise(vec2(vUv.x * 26.0 + uTime * 0.6, vUv.y * 3.0 - uTime * 0.15)) * 0.65
+                + noise(vec2(vUv.x * 61.0 - uTime * 0.35, vUv.y * 6.0 + uTime * 0.08)) * 0.35;
+
+        float a = band * rim * (0.35 + n * 0.65) * uOpacity * uNear;
+        if (a < 0.004) discard;
+        gl_FragColor = vec4(uColor, a);
+      }`,
     fog: false,
   });
   const mesh = new THREE.Mesh(geometry, material);
@@ -109,6 +166,50 @@ export function createZones(scene, options) {
   mesh.frustumCulled = false;
   mesh.position.set(CX, B.fogHeight * 0.5 - B.fogDrop, CZ);
   if (scene) scene.add(mesh);
+
+  // The name of the ring you are being turned back from, floating on the fog itself. The DOM
+  // line at the bottom of the screen says what you still need; this says WHERE you are, which
+  // is the part you want while flying rather than while reading.
+  let signLabel = '';
+  const signCanvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+  let sign = null;
+  if (signCanvas && scene) {
+    signCanvas.width = 1024;
+    signCanvas.height = 192;
+    const tex = new THREE.CanvasTexture(signCanvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    // A plane, not a sprite: a sprite swivels to face the camera, and Jurek asked for a sign
+    // that simply stands there. It is pinned to one point on the ring — straight out from the
+    // hollow's mouth — and turned to face the tree, so it reads head-on to a queen flying out
+    // and is a landmark rather than a HUD element.
+    sign = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({
+        map: tex, transparent: true, depthWrite: false, side: THREE.FrontSide, fog: false,
+      })
+    );
+    sign.name = 'zone-sign';
+    sign.renderOrder = 4;
+    sign.scale.set(52, 9.8, 1);
+    sign.visible = false;
+    scene.add(sign);
+  }
+
+  function drawSign(text) {
+    if (!sign || text === signLabel) return;
+    signLabel = text;
+    const ctx = signCanvas.getContext('2d');
+    ctx.clearRect(0, 0, signCanvas.width, signCanvas.height);
+    ctx.font = '600 76px ui-rounded, -apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.letterSpacing = '14px';
+    ctx.shadowColor = 'rgba(0,0,0,.85)';
+    ctx.shadowBlur = 22;
+    ctx.fillStyle = '#f7ead2';
+    ctx.fillText(text.toUpperCase(), signCanvas.width / 2, signCanvas.height / 2);
+    sign.material.map.needsUpdate = true;
+  }
 
   const messageEl = opts.messageElement !== undefined ? opts.messageElement : makeMessageElement();
 
@@ -145,12 +246,23 @@ export function createZones(scene, options) {
     state.limit = limit;
     const scale = limit / baseRadius;
     mesh.scale.set(scale, 1, scale);
-    // The barrier's LOGIC ships; its rendering does not. As a translucent double-sided
-    // cylinder it read as a hard wall with a visible vertical seam across the screen —
-    // the master prompt is explicit that a locked border is fog, never a wall. Until it
-    // is rebuilt as a soft radial fog, the queen is still turned back with a message,
-    // she just is not shown a slab. Flip this to `open < BANDS.length` once it is fog.
-    mesh.visible = false;
+    // It is fog now, so it ships. The last ring has nothing beyond it to fence off.
+    mesh.visible = open < BANDS.length;
+    if (sign) {
+      if (open < BANDS.length) {
+        drawSign(BANDS[open].label);
+        // Straight out from the hollow's mouth. The aperture normal is +Z for the shipped
+        // layout, so the sign sits at (centre + limit) along +Z and faces back at the tree.
+        sign.position.set(CX, SIGN_HEIGHT, CZ + limit);
+        // lookAt the hive rather than a hand-picked rotation: a guessed Y rotation showed the
+        // plane's back face, which renders the text mirrored. Aiming it at the tree is
+        // unambiguous and stays correct if the entrance ever moves.
+        sign.lookAt(CX, SIGN_HEIGHT, CZ);
+        sign.visible = true;
+      } else {
+        sign.visible = false;
+      }
+    }
   }
 
   function setEffects(next) {
@@ -198,7 +310,18 @@ export function createZones(scene, options) {
   // MEADOW; inside the tree they mean nothing.
   function update(dt, flight, insideness) {
     if (comb && comb.effects && comb.effects !== effects) setEffects(comb.effects);
-    if (material.alphaMap) material.alphaMap.offset.x = (material.alphaMap.offset.x + dt * B.fogScroll) % 1;
+    // Drive the fog. `uNear` is the whole reason it does not loom across the meadow: the fog
+    // only exists within reach of the line that turns you back, and fades out entirely once
+    // you are well inside your own ring.
+    material.uniforms.uTime.value += dt;
+    if (flight && flight.position) {
+      const px = flight.position.x - CX;
+      const pz = flight.position.z - CZ;
+      const d = Math.sqrt(px * px + pz * pz);
+      const fadeFrom = Math.max(1, B.thickness * 2.6);
+      const near = 1 - Math.min(1, Math.max(0, (limit - d) / fadeFrom));
+      material.uniforms.uNear.value += (near - material.uniforms.uNear.value) * Math.min(1, dt * 4);
+    }
     if (insideness > 0.001) {
       state.blocked = false;
       state.turned = false;

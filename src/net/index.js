@@ -986,19 +986,16 @@ export function createNet(session) {
   };
 }
 
-// Solo is not a separate code path — it is a session you happen to be alone in. The
-// code is minted once per browser so the solo hollow persists between visits.
+// Solo is not a separate code path — it is a session you happen to be alone in. The code
+// used to be minted once per browser so the solo hollow persisted between visits; the design
+// is now one session, one hive, so every launch mints a fresh one and nothing carries over.
+// A shared hive still persists for as long as its code is in use — that is what makes playing
+// together across a break possible — this only governs the private, unshared world.
 function soloCode() {
   try {
-    if (typeof localStorage !== 'undefined') {
-      const existing = localStorage.getItem('ht.solo.code');
-      if (typeof existing === 'string' && existing.length >= NET.codeMinLength) return existing;
-      const fresh = normalizeHiveCode('');
-      localStorage.setItem('ht.solo.code', fresh);
-      return fresh;
-    }
+    if (typeof localStorage !== 'undefined') localStorage.removeItem('ht.solo.code');
   } catch (error) {
-    // private mode — a fresh solo world each visit is an acceptable degradation
+    // private mode — nothing was stored to begin with
   }
   return normalizeHiveCode('');
 }

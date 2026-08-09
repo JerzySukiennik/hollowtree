@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { COMB } from '../config.js';
 import { CELL_BY_ID, CELL_TYPES, COMB_TUNING } from '../config.comb.js';
 import { hexCellGeometry } from './comb.js';
+import { createReticle } from '../ui/reticle.js';
 
 const _origin = new THREE.Vector3();
 const _dir = new THREE.Vector3();
@@ -61,6 +62,15 @@ export function createBuildMode(options) {
     message: '',
     messageAt: 0,
   };
+
+  // ------------------------------------------------------------------ reticle
+  //
+  // The aiming dot and its inspector card. They belong to play, not to build mode — you
+  // should be able to look at a cell and be told what it is without arming a placement —
+  // so they are ticked from update() before the `state.open` gate below, and the ray that
+  // feeds them is the same analytic aim() the ghost uses. Sixteen plane tests per frame
+  // (four now that the lattice is a single course) is cheaper than one mesh raycast.
+  const reticle = opts.reticle === false ? null : createReticle();
 
   // ------------------------------------------------------------------ ghost visual
 
@@ -276,10 +286,32 @@ export function createBuildMode(options) {
 
   let pulse = 0;
 
+  // The hovered cell, kept fresh whether or not build mode is open. When it is open,
+  // refresh() has already written state.hover this frame and re-running the ray would be
+  // pure duplication; when it is closed, this is the only thing that computes it.
+  function trackHover() {
+    if (state.open) return state.hover;
+    // Inside the hollow only: on the meadow the wall planes still exist behind the rock,
+    // and a ray that clips one would name a cell the player cannot possibly be looking at.
+    if (!canOpenNow() || !rayFromCamera()) {
+      state.hover = null;
+      return null;
+    }
+    state.hover = aim(_origin, _dir).hover;
+    return state.hover;
+  }
+
   function update(dt) {
-    if (!state.open) return;
+    if (!state.open) {
+      // Still a play frame: the dot belongs on screen everywhere the queen flies, and the
+      // inspector should answer "what is that cell" without arming build mode first.
+      const hover = trackHover();
+      if (reticle) reticle.tick(true, hover, comb);
+      return;
+    }
     pulse += dt || 0;
     refresh();
+    if (reticle) reticle.tick(true, state.hover, comb);
     if (ghost && ghost.visible) {
       const k = 0.28 + 0.1 * Math.sin(pulse * 4.2);
       ghost.material.opacity = state.valid ? k + 0.08 : k;
@@ -446,6 +478,7 @@ export function createBuildMode(options) {
   return {
     state,
     ghost,
+    reticle,
     update,
     open,
     close,
@@ -459,6 +492,7 @@ export function createBuildMode(options) {
     get isOpen() { return state.open; },
     dispose() {
       close();
+      if (reticle) reticle.dispose();
       if (target && opts.listen !== false) {
         window.removeEventListener('keydown', onKeyDown);
         target.removeEventListener('mousedown', onMouseDown);

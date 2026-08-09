@@ -10,17 +10,14 @@
 import { HUD } from '../config.js';
 import { CELL_TYPES, COST_KINDS } from '../config.comb.js';
 import { createRecipeBoard } from './recipe-board.js';
+import { cellIconEl, cellIconUrl } from './cell-icons.js';
 import { KIND_COLOR, KIND_LABEL, costPhrase } from './resource-sources.js';
 
-// The board is a first-run teacher as well as a reference: the first time a player ever
-// opens build mode it opens with it, because a player who does not know the board exists
-// cannot decide to press its key.
+// The board is a reference the player opens deliberately — with R or the button below the
+// picker. It used to open itself on the first ever entry into build mode; that is off (see
+// show() at the foot of this file), and the flag below only records that it has been seen.
 const SEEN_KEY = 'hollowtree.recipeBoard.seen';
 const BOARD_KEY = 'KeyR';
-
-function seenBoard() {
-  try { return window.localStorage.getItem(SEEN_KEY) === '1'; } catch (error) { return true; }
-}
 
 function markBoardSeen() {
   try { window.localStorage.setItem(SEEN_KEY, '1'); } catch (error) { /* private mode */ }
@@ -50,7 +47,12 @@ transition:background .18s ease,opacity .18s ease}
 .ht-type.is-sel{background:rgba(246,201,90,.13);box-shadow:inset 0 0 0 .5px rgba(246,201,90,.3)}
 .ht-type.is-locked{opacity:.3;cursor:default}
 .ht-type.is-poor .ht-type-cost{color:#ff9b8c}
-.ht-swatch{width:9px;height:9px;border-radius:2.5px;flex:0 0 auto;box-shadow:0 0 7px currentColor}
+/* the glyph replaced a 9px coloured square: three of the eight cells are shades of amber,
+   so the square could not tell them apart and the shape can. */
+.ht-type-icon{width:20px;height:20px;flex:0 0 auto;opacity:.94}
+.ht-type.is-sel .ht-type-icon{opacity:1}
+.ht-build-selhead{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.ht-build-selname{font-size:12px;letter-spacing:.02em;color:#fff3d8}
 .ht-type-name{flex:1 1 auto;font-size:11.5px;letter-spacing:.02em;white-space:nowrap;
 overflow:hidden;text-overflow:ellipsis}
 .ht-type-cost{display:flex;gap:6px;font-size:10.5px;color:${HUD.colors.dim};white-space:nowrap}
@@ -134,10 +136,9 @@ export function createBuildPanel(handlers) {
   const rows = new Map();
   for (const type of CELL_TYPES) {
     const row = el('div', 'ht-type', card);
-    const swatch = el('i', 'ht-swatch', row);
-    const hex = `#${type.color.toString(16).padStart(6, '0')}`;
-    swatch.style.background = hex;
-    swatch.style.color = hex;
+    const icon = cellIconEl(type.id, 20, type.name);
+    icon.className = 'ht-type-icon';
+    row.appendChild(icon);
     const name = el('div', 'ht-type-name', row, type.name);
     const cost = el('div', 'ht-type-cost', row);
     cost.innerHTML = costText(type.cost);
@@ -149,6 +150,13 @@ export function createBuildPanel(handlers) {
   }
 
   const foot = el('div', 'ht-build-foot', card);
+  // The footer describes the selected cell but never named it — the only clue was which
+  // row was highlighted, which is off-screen the moment the list scrolls.
+  const selHead = el('div', 'ht-build-selhead', foot);
+  const selIcon = cellIconEl(CELL_TYPES[0].id, 22, '');
+  selIcon.style.display = 'block';
+  selHead.appendChild(selIcon);
+  const selName = el('div', 'ht-build-selname', selHead);
   const costLine = el('div', 'ht-build-cost', foot);
   const blurb = el('div', 'ht-build-blurb', foot);
   const bonusLine = el('div', 'ht-build-line', foot);
@@ -222,6 +230,10 @@ export function createBuildPanel(handlers) {
     }
 
     const type = rows.get(state.typeId);
+    setText(selName, type ? type.type.name : '');
+    const iconUrl = type ? cellIconUrl(type.type.id, 22) : '';
+    if (selIcon.getAttribute('src') !== iconUrl) selIcon.src = iconUrl;
+    selIcon.style.visibility = type ? 'visible' : 'hidden';
     setHtml(costLine, type ? costHtml(type.type.cost) : '');
     setText(blurb, type ? type.type.blurb : '');
 

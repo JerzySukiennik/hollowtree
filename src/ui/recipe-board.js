@@ -10,10 +10,13 @@
 // cost in config.comb.js and the board changes with it. Nothing here is hand-copied.
 
 import { CELL_TYPES, COMB_TUNING, COST_KINDS } from '../config.comb.js';
-import { HUD, SCREENS } from '../config.js';
+import { FLOWER_SPECIES, HUD, SCREENS } from '../config.js';
 import {
   KIND_COLOR, KIND_LABEL, costPhrase, flowersFor, bandLabel,
+  SEASON_NAMES, bloomInfo, bloomOpenNow, currentYearT,
 } from './resource-sources.js';
+import { flowerIconImg } from './flower-icons.js';
+import { cellIconImg } from './cell-icons.js';
 
 const C = SCREENS.colors;
 
@@ -58,7 +61,7 @@ scrollbar-width:thin;scrollbar-color:rgba(246,201,90,.32) transparent}
 .ht-rcard{padding:12px 13px 11px;border-radius:11px;
 background:rgba(255,255,255,.035);border:.5px solid rgba(255,255,255,.08)}
 .ht-rcard-head{display:flex;align-items:center;gap:8px;margin-bottom:7px}
-.ht-rcard-swatch{width:9px;height:9px;border-radius:2.5px;flex:0 0 auto;box-shadow:0 0 8px currentColor}
+.ht-rcard-head img{width:22px;height:22px;flex:0 0 auto}
 .ht-rcard-name{flex:1 1 auto;font-size:12.5px;letter-spacing:.02em;color:${C.bright}}
 .ht-rcard-time{font-size:9.5px;letter-spacing:.06em;color:${C.dim};white-space:nowrap}
 .ht-rcard-cost{font-size:11px;margin-bottom:7px;color:${HUD.colors.text}}
@@ -70,14 +73,42 @@ margin-top:3px}
 .ht-rline.is-warn i{color:#ff9b8c}
 .ht-rline.is-warn{color:rgba(255,178,164,.86)}
 
-.ht-rflow{display:grid;gap:9px;grid-template-columns:repeat(auto-fill,minmax(232px,1fr))}
-.ht-rflow-item{padding:10px 12px;border-radius:10px;
-background:rgba(255,255,255,.03);border:.5px solid rgba(255,255,255,.07)}
-.ht-rflow-head{display:flex;align-items:center;gap:7px;margin-bottom:5px;
-font-size:10px;letter-spacing:.2em;text-transform:uppercase}
-.ht-rflow-dot{width:6px;height:6px;border-radius:50%;box-shadow:0 0 7px currentColor}
-.ht-rflow-list{font-size:10.5px;line-height:1.6;color:rgba(247,234,210,.78)}
-.ht-rflow-list b{font-weight:600;color:${HUD.colors.text}}
+/* the flower table — ten species, what each one carries, where it grows and when it opens.
+   One grid, one column template shared by the header and every row, so the columns line up
+   without a <table> and still collapse sensibly on a narrow board. */
+.ht-rt{border-radius:11px;overflow:hidden;
+background:rgba(255,255,255,.028);border:.5px solid rgba(255,255,255,.08)}
+.ht-rt-row{display:grid;align-items:center;gap:14px;padding:7px 12px;
+grid-template-columns:minmax(126px,1.3fr) 54px 54px 48px minmax(96px,.9fr) minmax(178px,1.5fr)}
+.ht-rt-row+.ht-rt-row{border-top:.5px solid rgba(255,255,255,.055)}
+.ht-rt-head{padding-top:8px;padding-bottom:8px;background:rgba(255,255,255,.035);
+font-size:8.5px;letter-spacing:.2em;text-transform:uppercase;color:${C.dim}}
+/* the three yield headings sit in 54px columns; at the section's tracking they collided
+   into POLLENNECTARRESIN, so they lose the letter-spacing the rest of the head keeps */
+.ht-rt-head .ht-rt-num{text-align:right;letter-spacing:.04em;font-size:8.5px}
+.ht-rt-name{display:flex;align-items:center;gap:8px;font-size:11.5px;color:${C.bright};
+letter-spacing:.01em;min-width:0}
+.ht-rt-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ht-rt-num{font-size:11.5px;text-align:right;font-variant-numeric:tabular-nums}
+.ht-rt-num.is-zero{color:rgba(247,234,210,.22)}
+.ht-rt-ring{font-size:10.5px;color:rgba(247,234,210,.72);white-space:nowrap;
+overflow:hidden;text-overflow:ellipsis}
+.ht-rt-when{min-width:0}
+.ht-rt-bar{position:relative;height:7px;border-radius:4px;overflow:hidden;
+background:rgba(255,255,255,.08)}
+.ht-rt-bar b{position:absolute;top:0;bottom:0;background:${C.honey};opacity:.85;border-radius:4px}
+.ht-rt-bar u{position:absolute;top:0;bottom:0;width:1.5px;background:#fff3d8;
+box-shadow:0 0 6px rgba(255,243,216,.9)}
+/* season boundaries, drawn over the fill so a window that ends mid-season still reads */
+.ht-rt-bar i{position:absolute;top:0;bottom:0;width:1px;background:rgba(24,17,9,.75)}
+.ht-rt-when-label{margin-top:4px;font-size:9.5px;letter-spacing:.03em;
+color:rgba(247,234,210,.72);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ht-rt-when-label em{font-style:normal;color:#a8e8b4}
+.ht-rt-seasons{display:grid;grid-template-columns:repeat(4,1fr);margin-top:3px;
+font-size:8px;letter-spacing:.06em;text-transform:uppercase;color:rgba(247,234,210,.34)}
+.ht-rt-seasons span{text-align:center}
+.ht-rt-note{margin-top:8px;font-size:10px;line-height:1.6;color:rgba(247,234,210,.66)}
+.ht-rt-note b{font-weight:600;color:${HUD.colors.text}}
 
 .ht-recipes-foot{padding:11px 22px 13px;border-top:.5px solid rgba(247,234,210,.1);
 font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:${C.dim}}
@@ -92,10 +123,6 @@ function el(tag, cls, parent, text) {
   if (text !== undefined) node.textContent = text;
   if (parent) parent.appendChild(node);
   return node;
-}
-
-function hex(color) {
-  return `#${color.toString(16).padStart(6, '0')}`;
 }
 
 function nameOf(id) {
@@ -219,9 +246,7 @@ function costHtml(cost) {
 function makeCard(type, parent) {
   const card = el('div', 'ht-rcard', parent);
   const head = el('div', 'ht-rcard-head', card);
-  const swatch = el('i', 'ht-rcard-swatch', head);
-  swatch.style.background = hex(type.color);
-  swatch.style.color = hex(type.color);
+  head.insertAdjacentHTML('afterbegin', cellIconImg(type.id, 22, type.name));
   el('div', 'ht-rcard-name', head, type.name);
   el('div', 'ht-rcard-time', head, `${type.buildTime}s to build`);
 
@@ -238,6 +263,92 @@ function makeCard(type, parent) {
     el('div', null, row, line.text);
   }
   return card;
+}
+
+// ---------------------------------------------------------------- the flower table
+//
+// "Where do I get nectar?" was a question the game could not answer anywhere on screen.
+// The board named two flowers per resource and stopped there, which left out half the
+// meadow and all of the calendar — and the calendar is the half that bites, because a
+// flower outside its bloom window gives nothing however long you hover it.
+//
+// Ten species, every yield, the ring it grows in and the weeks it is open. Read straight
+// from FLOWER_SPECIES, so it cannot drift from what the meadow actually hands over.
+
+function yieldText(value) {
+  if (!value) return '—';
+  return value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+}
+
+function makeFlowerTable(parent) {
+  const table = el('div', 'ht-rt', parent);
+
+  const head = el('div', 'ht-rt-row ht-rt-head', table);
+  el('div', null, head, 'flower');
+  for (const kind of COST_KINDS) {
+    const cell = el('div', 'ht-rt-num', head, KIND_LABEL[kind]);
+    cell.style.color = KIND_COLOR[kind];
+    cell.style.opacity = '.75';
+  }
+  el('div', null, head, 'grows in');
+  const whenHead = el('div', 'ht-rt-when', head);
+  el('div', null, whenHead, 'when it blooms');
+  // The four season names sit directly under the header and directly over every bar, so
+  // the bars are labelled once instead of ten times.
+  const legend = el('div', 'ht-rt-seasons', whenHead);
+  for (const name of SEASON_NAMES) el('span', null, legend, name);
+
+  // Nearest ring first — the order the player unlocks them in — and the richest flower
+  // first inside each ring, so the top of every group is the one worth flying to.
+  const species = FLOWER_SPECIES.slice().sort((a, b) => {
+    const zone = (a.zone || 0) - (b.zone || 0);
+    if (zone) return zone;
+    const best = (s) => Math.max(s.pollen || 0, s.nectar || 0, s.resin || 0);
+    return best(b) - best(a);
+  });
+
+  const live = [];
+  for (const s of species) {
+    const row = el('div', 'ht-rt-row', table);
+    const name = el('div', 'ht-rt-name', row);
+    name.insertAdjacentHTML('afterbegin', flowerIconImg(s.id, 22, s.name));
+    el('span', null, name, s.name);
+    for (const kind of COST_KINDS) {
+      const value = s[kind] || 0;
+      const cell = el('div', `ht-rt-num${value ? '' : ' is-zero'}`, row, yieldText(value));
+      if (value) cell.style.color = KIND_COLOR[kind];
+    }
+    el('div', 'ht-rt-ring', row, bandLabel(s.zone || 0));
+
+    const when = el('div', 'ht-rt-when', row);
+    const info = bloomInfo(s);
+    const bar = el('div', 'ht-rt-bar', when);
+    bar.innerHTML = info.spans
+      .map(([a, b]) => `<b style="left:${(a * 100).toFixed(2)}%;width:${((b - a) * 100).toFixed(2)}%"></b>`)
+      .join('')
+      + [1, 2, 3].map((i) => `<i style="left:${i * 25}%"></i>`).join('');
+    const marker = el('u', null, bar);
+    marker.style.display = 'none';
+    const label = el('div', 'ht-rt-when-label', when);
+    live.push({ species: s, info, marker, label });
+  }
+
+  // The "now" line, and the flowers that are open behind it. Recomputed each time the
+  // board is opened rather than ticked: the year turns over eight real days, so a value
+  // sampled on open is right for as long as anyone has the board up.
+  function refresh() {
+    const t = currentYearT();
+    for (const entry of live) {
+      const open = t === null ? null : bloomOpenNow(entry.species, t);
+      entry.marker.style.display = t === null ? 'none' : 'block';
+      if (t !== null) entry.marker.style.left = `${(t * 100).toFixed(2)}%`;
+      entry.label.innerHTML = open
+        ? `${entry.info.label} <em>· open now</em>`
+        : entry.info.label;
+    }
+  }
+  refresh();
+  return refresh;
 }
 
 function makeSection(parent, title, note) {
@@ -261,8 +372,9 @@ export function createRecipeBoard(options) {
   const head = el('div', 'ht-recipes-head', card);
   el('div', 'ht-recipes-title', head, 'recipe board');
   el('div', 'ht-recipes-sub', head,
-    'Everything you can build, what it costs, and what it does. '
-    + 'Fly out and gather pollen, nectar and resin with E, come back, press TAB, and spend them here.');
+    'Everything you can build, what it costs and what it does — and, at the foot, every '
+    + 'flower in the world: what it carries, where it grows and when it is open. Gather with '
+    + 'E, fly back into the hollow, press TAB, and spend it here.');
   const close = el('button', 'ht-recipes-close', head, 'close  R');
 
   const body = el('div', 'ht-recipes-body', card);
@@ -285,26 +397,28 @@ export function createRecipeBoard(options) {
   // Where the three numbers in every recipe actually come from. Without this the board
   // would still leave "8 pollen" as a thing that happens to you rather than a thing you go
   // and get from a named flower in a named ring.
-  const where = makeSection(body, 'where the ingredients come from',
-    'fly to a flower, slow down, hold E — then fly back into the hollow to drop it off');
-  const flowGrid = el('div', 'ht-rflow', where);
-  for (const kind of COST_KINDS) {
-    const item = el('div', 'ht-rflow-item', flowGrid);
-    const itemHead = el('div', 'ht-rflow-head', item);
-    const dot = el('i', 'ht-rflow-dot', itemHead);
-    dot.style.background = KIND_COLOR[kind];
-    dot.style.color = KIND_COLOR[kind];
-    itemHead.appendChild(document.createTextNode(KIND_LABEL[kind]));
-    const listEl = el('div', 'ht-rflow-list', item);
-    // Richest first, with the ring named after it. Sorting by ring instead reads "nicely"
-    // but answers the wrong question: it buried field poppy (4.2 pollen) under red clover
-    // (1.2) purely because both grow near home. The board is asked "which flower gives me
-    // pollen", and the honest answer is the best one, plus how far it is.
-    const flowers = flowersFor(kind).slice(0, 4);
-    listEl.innerHTML = flowers
-      .map((s) => `<b>${s.name}</b> — ${bandLabel(s.zone || 0)}`)
-      .join('<br>') || 'nothing carries this yet';
-  }
+  const where = makeSection(body, 'every flower in the world',
+    'fly to one, slow down, hold E — then fly back into the hollow to drop it off');
+  const refreshFlowers = makeFlowerTable(where);
+
+  // The one-line answer under the table, generated from the same data: the best source of
+  // each resource you can reach from minute one, and the best there is anywhere. That gap
+  // is the reason the rings are worth unlocking, and it was never stated.
+  const note = el('div', 'ht-rt-note', where);
+  note.innerHTML = COST_KINDS.map((kind) => {
+    const near = flowersFor(kind, 0)[0];
+    const best = flowersFor(kind)[0];
+    if (!best) return '';
+    const nearPart = near
+      ? `<b>${near.name}</b> in ${bandLabel(near.zone || 0)} (${yieldText(near[kind])})`
+      : 'nothing you can reach yet';
+    if (near && best.id === near.id) {
+      return `Best ${KIND_LABEL[kind]}: ${nearPart} — and nothing beats it further out.`;
+    }
+    return `Best ${KIND_LABEL[kind]} close to home: ${nearPart}. `
+      + `Best anywhere: <b>${best.name}</b> in ${bandLabel(best.zone || 0)} (${yieldText(best[kind])}), `
+      + 'once that ring is open.';
+  }).filter(Boolean).join('<br>');
 
   const startCost = costPhrase(starters[0] ? starters[0].cost : null);
   const foot = el('div', 'ht-recipes-foot', card,
@@ -323,6 +437,9 @@ export function createRecipeBoard(options) {
     shown = true;
     root.classList.add('is-on');
     body.scrollTop = 0;
+    // The year has turned since the board was built; the "now" line and the "open now"
+    // tags are only true if they are re-read every time it comes up.
+    refreshFlowers();
     if (typeof opts.onShow === 'function') opts.onShow();
   }
 

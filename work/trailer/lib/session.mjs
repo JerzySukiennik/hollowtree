@@ -14,7 +14,7 @@ export const WIDTH = 1920;
 export const HEIGHT = 1080;
 export const FPS = 60;
 export const STEP_MS = 1000 / FPS;
-export const URL = 'http://localhost:8124/';
+export const URL = 'http://localhost:8150/';
 // Every session steps exactly this many frames before the first shot, so the simulation is
 // always at the same phase when capture starts.
 export const BOOT_FRAMES = 900;
