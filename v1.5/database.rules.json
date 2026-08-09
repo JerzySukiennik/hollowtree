@@ -1,0 +1,31 @@
+{
+  "rules": {
+    "hives": {
+      "$code": {
+        ".read": "$code.length >= 8",
+        ".write": "$code.length >= 8",
+        "presence": {
+          "$uid": {
+            ".validate": "newData.hasChildren(['name', 'at'])",
+            "name": { ".validate": "newData.isString() && newData.val().length <= 24" },
+            "at": { ".validate": "newData.isNumber()" },
+            "$other": { ".validate": "true" }
+          }
+        },
+        "queens": {
+          "$uid": {
+            ".validate": "newData.hasChildren(['p'])",
+            "$other": { ".validate": "true" }
+          }
+        },
+        "bank": {
+          "$kind": { ".validate": "newData.isNumber() && newData.val() >= 0" }
+        },
+        "world": { ".validate": "true" },
+        "comb": { ".validate": "true" },
+        "$other": { ".validate": "false" }
+      }
+    },
+    "$other": { ".read": false, ".write": false }
+  }
+}

@@ -7,18 +7,25 @@ import { renderShot, shotList } from './lib/render-shot.mjs';
 async function probe() {
   const browser = await launch();
   const { page, stepper } = await openGame(browser, { dateEpoch: 1754640000000 });
-  const shot = (await shotList(page)).find((s) => s.id === 'b2-meadow');
-  await setTimeOfDay(page, shot.timeOfDay);
-  await page.evaluate(() => window.__cine.beginShot('b2-meadow'));
-  for (let i = 0; i < 60; i++) {
-    await page.evaluate(() => window.__cine.frame(0));
-    await stepper.step();
+  const SHOT = process.argv[2] || 'b2-meadow';
+  const shot = (await shotList(page)).find((s) => s.id === SHOT);
+  await page.evaluate(() => {
+    window.__fixedCount = 0;
+    window.hollowtree.loop.onFixed(() => { window.__fixedCount++; });
+  });
+  if (process.env.NO_PLACE) {
+    await page.evaluate(() => { const c = window.hollowtree.nest.comb; c.place = async () => ({ ok: false }); });
   }
+  await setTimeOfDay(page, shot.timeOfDay);
+  await page.evaluate((id) => window.__cine.beginShot(id), SHOT);
+  for (let i = 0; i < 60; i++) await stepper.advance(0);
+  for (let i = 0; i < 200; i++) { await stepper.advance(i); if (process.env.SHOTS) await stepper.buffer(); }
   const out = await page.evaluate(() => {
     const ht = window.hollowtree;
     const v = (o) => (o ? [+o.x.toFixed(6), +o.y.toFixed(6), +o.z.toFixed(6)] : null);
     return {
       frames: window.__h.frames,
+      fixedCount: window.__fixedCount,
       vt: window.__h.vt,
       epoch: window.__h.epoch,
       netOffset: ht.net && ht.net.world ? ht.net.world.now() - Date.now() : null,
@@ -40,6 +47,8 @@ async function probe() {
       swarmCount: ht.swarm ? ht.swarm.count : null,
       swarmComp: ht.swarm ? JSON.stringify(ht.swarm.composition) : null,
       combCells: ht.nest.comb ? ht.nest.comb.count : null,
+      combSnapshot: ht.nest.comb ? Object.keys(ht.nest.comb.snapshot()).sort().join(',').length : null,
+      resources: JSON.stringify(ht.resources.snapshot()),
       gather: ht.gather ? [+ht.gather.state.charge.toFixed(6), +ht.gather.state.load.toFixed(6)] : null,
       season: ht.season,
       tri: ht.renderer.info.render.triangles,

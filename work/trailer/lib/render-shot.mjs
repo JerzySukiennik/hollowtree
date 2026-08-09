@@ -24,18 +24,14 @@ export async function renderShot(page, stepper, shot, {
   await page.evaluate((sid) => window.__cine.beginShot(sid), shot.id);
 
   // Preroll: hold the opening frame while the world catches up to it.
-  for (let i = 0; i < PREROLL; i++) {
-    await page.evaluate(() => window.__cine.frame(0));
-    await stepper.step();
-  }
+  for (let i = 0; i < PREROLL; i++) await stepper.advance(0);
 
   const total = Math.round(shot.seconds * 60);
   const end = lastFrame === null ? total : Math.min(total, lastFrame);
   const hashes = [];
 
   for (let i = 0; i < end; i++) {
-    await page.evaluate((n) => window.__cine.frame(n), i);
-    await stepper.step();
+    await stepper.advance(i);
     if (i < firstFrame) continue;
     if ((i - firstFrame) % everyN !== 0) continue;
     const buf = await stepper.buffer();

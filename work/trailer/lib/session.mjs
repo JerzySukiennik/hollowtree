@@ -185,6 +185,10 @@ export async function openGame(browser, {
     ht.camera.lookAt(0, 4, 0);
   });
 
+  // From here on the page's own timers run on the virtual clock too, so nothing in the
+  // world can advance because a screenshot took a while.
+  await page.evaluate(() => window.__h.freezeTimers());
+
   // Pad to a fixed frame count. However many frames the skip happened to need, every
   // session arrives at the first shot having stepped exactly BOOT_FRAMES of them.
   const consumed = await page.evaluate(() => window.__h.frames);
@@ -203,6 +207,9 @@ function makeStepper(page) {
         for (let i = 0; i < count; i++) window.__h.step(dt);
         return window.__h.frames;
       }, n, STEP_MS);
+    },
+    async advance(frameIndex) {
+      return page.evaluate((n, dt) => window.__h.advance(n, dt), frameIndex, STEP_MS);
     },
     async shot(path) {
       return page.screenshot({ path, type: 'png', optimizeForSpeed: true, captureBeyondViewport: false });

@@ -13,3 +13,6 @@ assets/ui/inputprompts/
 work/trailer/node_modules/
 work/trailer/frames/
 work/trailer/out/
+work/trailer/shots/
+work/trailer/*.mp4
+work/trailer/tmp/

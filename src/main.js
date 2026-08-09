@@ -629,10 +629,12 @@ async function boot() {
         season = net.world.seasonPhase();
         if (window.hollowtree) window.hollowtree.season = season.name;
       }
-    } else {
-      // Offline the calendar still turns — same maths, this machine's clock as the epoch.
-      season = seasonAt(worldNow(), soloEpoch);
-      if (window.hollowtree) window.hollowtree.season = season.name;
+      // Remote queens. This block used to sit in the `else` arm below — the arm where `net`
+      // is null — so it never ran in a session that had peers, and it called `net.peers` in
+      // a branch where `net` is null, which only failed to throw because offline `remotes` is
+      // always empty. The visuals were therefore created on join and never moved again: every
+      // other player sat at the spawn origin, buried in the ground, while flying normally on
+      // their own screen.
       for (const [uid, visual] of remotes) {
         const peer = net.peers.get(uid);
         if (!peer || !peer.hasMotion || !visual) continue;
@@ -643,6 +645,10 @@ async function boot() {
           boostAmount: 0,
         });
       }
+    } else {
+      // Offline the calendar still turns — same maths, this machine's clock as the epoch.
+      season = seasonAt(worldNow(), soloEpoch);
+      if (window.hollowtree) window.hollowtree.season = season.name;
     }
 
     if (gather && mode === 'play') {
