@@ -21,6 +21,9 @@ export async function renderShot(page, stepper, shot, {
   // stamping a phase and then moving the clock lands the shot somewhere else in the chain
   // — which is how a request for clear sky turned into rain.
   if (typeof shot.timeOfDay === 'number') await setTimeOfDay(page, shot.timeOfDay);
+  // A shot that re-bases the weather schedule has to know how much world time the preroll
+  // below will burn, or its first phase is already a second old when the first frame lands.
+  await page.evaluate((ms) => { window.__cine.prerollMs = ms; }, (PREROLL * STEP_MS));
   await page.evaluate((sid) => window.__cine.beginShot(sid), shot.id);
 
   // Preroll: hold the opening frame while the world catches up to it.

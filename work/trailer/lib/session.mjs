@@ -172,6 +172,21 @@ export async function openGame(browser, {
     }
   });
 
+  // hornets.js is the one shared-state module with no detachNet(): it talks to the world
+  // node directly. It computes a raid's outcome locally AND publishes it, and the local
+  // driver echoes that publish back through a simulated-latency timer on the real clock, so
+  // adopt() lands on whichever frame the echo happens to catch and rewrites which hornets
+  // breach. That is why the raid shot came out a few pixels different on every render while
+  // every other shot was frame-identical. Swallowing writes to the 'hornets' key leaves the
+  // local computation — a pure function of the calendar — and removes the echo.
+  await page.evaluate(() => {
+    const world = window.hollowtree.net && window.hollowtree.net.world;
+    if (!world || typeof world.set !== 'function' || world.__cineNoHornets) return;
+    world.__cineNoHornets = true;
+    const set = world.set.bind(world);
+    world.set = (key, value) => (key === 'hornets' ? Promise.resolve(true) : set(key, value));
+  });
+
   // The built-in opening leaves the queen — and therefore the camera — inside the hollow,
   // which latches the portal to insideness 1. Park both out on the meadow and let the
   // portal, the LOD rings, the flower streaming and the grass wind settle before any shot
